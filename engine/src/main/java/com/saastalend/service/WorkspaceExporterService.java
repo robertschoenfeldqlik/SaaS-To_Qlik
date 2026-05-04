@@ -58,14 +58,17 @@ public class WorkspaceExporterService {
     public byte[] exportWorkspace(String projectName, List<TalendJob> jobs,
                                     Map<String, String> extraFiles) {
         String projectDir = sanitizeProjectDir(projectName);
-        String projectId = projectDir.toUpperCase();
 
         try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
              ZipOutputStream zos = new ZipOutputStream(baos)) {
 
             // ── talend.project (project root) ──
-            String talendProjectXml = xmlWriter.writeTalendProjectXml(projectName);
-            addZipEntry(zos, projectDir + "/talend.project", talendProjectXml);
+            // We need the generated xmi:id and technical label so each .properties
+            // file's <author href="../talend.project#XXXX"/> resolves to the same
+            // project, and additionalProperties.value matches the technicalLabel.
+            TalendXmlWriterService.ProjectXml projectXml =
+                    xmlWriter.writeTalendProjectXmlWithId(projectName);
+            addZipEntry(zos, projectDir + "/talend.project", projectXml.xml);
 
             // ── Required empty directories (Talend expects these to exist) ──
             addEmptyDir(zos, projectDir + "/process/");
@@ -88,8 +91,10 @@ public class WorkspaceExporterService {
                     String itemXml = xmlWriter.writeItemXml(job);
                     addZipEntry(zos, basePath + ".item", itemXml);
 
-                    // .properties file (job metadata XML)
-                    String propsXml = xmlWriter.writePropertiesXml(job, projectId);
+                    // .properties file — passes the project xmi:id + tech label
+                    // so cross-file XMI references resolve correctly.
+                    String propsXml = xmlWriter.writePropertiesXml(
+                            job, projectXml.technicalLabel, projectXml.projectXmiId);
                     addZipEntry(zos, basePath + ".properties", propsXml);
                 }
             }

@@ -120,7 +120,7 @@ public class TalendXmlWriterService {
         Element parameters = root.addElement("parameters");
         addElementParameter(parameters, "TEXT", "JOB_RUN_VM_ARGUMENTS",
                 " -Xms256M -Xmx1024M");
-        addElementParameter(parameters, "CHECK", "MULTI_THREAD_EXECATION", "false");
+        addElementParameter(parameters, "CHECK", "MULTI_THREAD_EXECUTION", "false");
         addElementParameter(parameters, "TEXT", "SCREEN_OFFSET_X", "0");
         addElementParameter(parameters, "TEXT", "SCREEN_OFFSET_Y", "0");
         addElementParameter(parameters, "CHECK", "IMPLICITCONTEXT_USE_PROJECT_SETTINGS", "true");
@@ -167,10 +167,20 @@ public class TalendXmlWriterService {
 
     /**
      * Generates the .properties XML for a Talend job.
-     * Uses the correct XMI wrapper format for Talend Studio import:
-     *   xmi:XMI → TalendProperties:Property + ItemState + ProcessItem
+     *
+     * Talend Studio's importer is strict about XMI cross-references:
+     *   - ProcessItem.property MUST resolve to Property.xmi:id
+     *   - ProcessItem.state    MUST resolve to ItemState.xmi:id
+     *   - author.href ../talend.project#X MUST resolve to Project.xmi:id
+     *   - additionalProperties.value MUST equal Project.technicalLabel
+     *
+     * IMPORTANT: dom4j's addAttribute(String,...) and addAttribute(QName,...)
+     * collide on local-name "id" — calling both leaves only the second one.
+     * We use unique attribute names so that doesn't happen, and we accept the
+     * project xmi:id from the caller so the cross-file reference resolves.
      */
-    public String writePropertiesXml(TalendJob job, String projectId) {
+    public String writePropertiesXml(TalendJob job, String projectTechLabel,
+                                     String projectXmiId) {
         Document document = DocumentHelper.createDocument();
 
         Namespace xmiNs = new Namespace("xmi", XMI_NS);
@@ -184,14 +194,15 @@ public class TalendXmlWriterService {
         String propId = "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 24);
         String itemStateId = "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 24);
         String processItemId = "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 24);
+        // Talend Studio's "human" id for the item — visible in repository as the property id
+        String humanId = job.getId() != null ? job.getId() : UUID.randomUUID().toString();
 
         String now = Instant.now().atOffset(ZoneOffset.UTC)
                 .format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"));
 
-        // Property element
+        // Property element — xmi:id is the XMI mechanical id (referenced by ProcessItem.property)
         Element property = root.addElement(new QName("Property", tpNs));
         property.addAttribute(new QName("id", xmiNs), propId);
-        property.addAttribute("id", job.getId());
         property.addAttribute("label", job.getName());
         property.addAttribute("purpose", job.getDescription() != null ? job.getDescription() : "");
         property.addAttribute("description", job.getDescription() != null ? job.getDescription() : "");
@@ -202,14 +213,14 @@ public class TalendXmlWriterService {
         property.addAttribute("item", processItemId);
         property.addAttribute("displayName", job.getName());
 
-        // Author reference
+        // Author reference — points to the project's xmi:id in talend.project
         Element author = property.addElement("author");
-        author.addAttribute("href", "../talend.project#" + propId);
+        author.addAttribute("href", "../talend.project#" + projectXmiId);
 
         // Additional properties
         Element addlProps = property.addElement("additionalProperties");
         addlProps.addAttribute("key", "project.technical.name");
-        addlProps.addAttribute("value", projectId != null ? projectId : "SAAS_TALEND");
+        addlProps.addAttribute("value", projectTechLabel != null ? projectTechLabel : "SAAS_TALEND");
 
         // ItemState element
         Element itemState = root.addElement(new QName("ItemState", tpNs));
@@ -229,10 +240,35 @@ public class TalendXmlWriterService {
     }
 
     /**
-     * Generates the talend.project XML for a Talend workspace.
-     * Matches the structure Talend Studio expects for project import.
+     * Holds the talend.project XML plus the project's xmi:id so callers
+     * (e.g. WorkspaceExporterService) can wire properties files'
+     * author href to the same project ID.
+     */
+    public static class ProjectXml {
+        public final String xml;
+        public final String projectXmiId;
+        public final String technicalLabel;
+
+        public ProjectXml(String xml, String projectXmiId, String technicalLabel) {
+            this.xml = xml;
+            this.projectXmiId = projectXmiId;
+            this.technicalLabel = technicalLabel;
+        }
+    }
+
+    /**
+     * Backward-compatible single-string overload.
      */
     public String writeTalendProjectXml(String projectName) {
+        return writeTalendProjectXmlWithId(projectName).xml;
+    }
+
+    /**
+     * Generates the talend.project XML for a Talend workspace.
+     * Returns the XML body plus the generated project xmi:id and technical label
+     * so other writers can produce coherent cross-references.
+     */
+    public ProjectXml writeTalendProjectXmlWithId(String projectName) {
         Document document = DocumentHelper.createDocument();
 
         Namespace xmiNs = new Namespace("xmi", XMI_NS);
@@ -284,7 +320,7 @@ public class TalendXmlWriterService {
             folderEl.addAttribute("type", "FOLDER");
         }
 
-        return formatXml(document);
+        return new ProjectXml(formatXml(document), projectXmiId, techLabel);
     }
 
     // ── Internal helpers ──
