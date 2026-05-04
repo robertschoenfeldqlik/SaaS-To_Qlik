@@ -23,9 +23,13 @@ public class TalendJobGeneratorService {
         List<TalendNode> nodes = new ArrayList<>();
         List<TalendConnection> connections = new ArrayList<>();
 
-        // Node 1: tRESTClient — calls the API (uses context.API_BASE_URL + path)
-        TalendNode restClient = TRESTClientGenerator.generate(endpoint, auth, baseUrl, 100, 100);
-        nodes.add(restClient);
+        // Pipeline matches real Talend Studio 8.0.1 output:
+        //   HTTPClient (was tRESTClient) → tExtractJSONFields → tLogRow + tFileOutputJSON
+        // HTTPClient emits a FLOW connector named "row1" carrying a "body" id_String column.
+
+        // Node 1: HTTPClient — calls the API (uses context.API_BASE_URL + path)
+        TalendNode httpClient = TRESTClientGenerator.generate(endpoint, auth, baseUrl, 100, 100);
+        nodes.add(httpClient);
 
         // Node 2: tExtractJSONFields — extracts records from JSON response
         TalendNode extractJson = TExtractJSONFieldsGenerator.generate(endpoint, 350, 100);
@@ -41,22 +45,22 @@ public class TalendJobGeneratorService {
         nodes.add(fileOutput);
 
         // Wire connections
-        String restClientName = getUniqueName(restClient);
+        String httpClientName  = getUniqueName(httpClient);
         String extractJsonName = getUniqueName(extractJson);
-        String logRowName = getUniqueName(logRow);
-        String fileOutputName = getUniqueName(fileOutput);
+        String logRowName      = getUniqueName(logRow);
+        String fileOutputName  = getUniqueName(fileOutput);
 
-        // tRESTClient → tExtractJSONFields (RESPONSE flow)
+        // HTTPClient → tExtractJSONFields (FLOW row1, since HTTPClient outputs FLOW)
         connections.add(ConnectionGenerator.generate(
-                restClientName, extractJsonName, "RESPONSE", "RESPONSE"));
+                httpClientName, extractJsonName, "FLOW", "row1"));
 
-        // tExtractJSONFields → tLogRow (FLOW row1)
+        // tExtractJSONFields → tLogRow (FLOW row2)
         connections.add(ConnectionGenerator.generate(
-                extractJsonName, logRowName, "FLOW", "row1"));
+                extractJsonName, logRowName, "FLOW", "row2"));
 
-        // tExtractJSONFields → tFileOutputJSON (FLOW row2)
+        // tExtractJSONFields → tFileOutputJSON (FLOW row3)
         connections.add(ConnectionGenerator.generate(
-                extractJsonName, fileOutputName, "FLOW", "row2"));
+                extractJsonName, fileOutputName, "FLOW", "row3"));
 
         return TalendJob.builder()
                 .id(jobId)

@@ -424,11 +424,25 @@ public class TalendXmlWriterService {
                 paramEl.addAttribute("field",
                         param.getField() != null ? param.getField().name() : "TEXT");
                 paramEl.addAttribute("name", param.getName());
-                paramEl.addAttribute("value",
-                        com.saastalend.generator.TDBRowGenerator.stripInvalidXmlChars(
-                                param.getValue() != null ? param.getValue() : ""));
+                // Real Talend omits the value attribute on TABLE params that have rows
+                // and only sets it on scalar params. Both forms work for import.
+                if (param.getValue() != null) {
+                    paramEl.addAttribute("value",
+                            com.saastalend.generator.TDBRowGenerator.stripInvalidXmlChars(
+                                    param.getValue()));
+                }
                 if (!param.isShow()) {
                     paramEl.addAttribute("show", "false");
+                }
+                // TABLE rows: emit each as <elementValue elementRef="..." value="..."/>
+                if (param.getTableEntries() != null) {
+                    for (TalendElementParameter.TableEntry te : param.getTableEntries()) {
+                        Element ev = paramEl.addElement("elementValue");
+                        ev.addAttribute("elementRef", te.getElementRef() != null ? te.getElementRef() : "");
+                        ev.addAttribute("value",
+                                com.saastalend.generator.TDBRowGenerator.stripInvalidXmlChars(
+                                        te.getValue() != null ? te.getValue() : ""));
+                    }
                 }
             }
         }
