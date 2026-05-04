@@ -153,34 +153,30 @@ public class WorkspaceExporterService {
         TalendXmlWriterService.ProjectXml projectXml =
                 xmlWriter.writeTalendProjectXmlWithId(projectName);
 
-        // 1) Eclipse .project marker — REQUIRED for Talend Studio to detect
-        //    the project during "Import existing project" wizard scan
-        entries.add(new Entry(projectDir + "/.project",
-                xmlWriter.writeEclipseProjectXml(projectXml.technicalLabel)));
+        // Layout matches a real Talend Studio 8.0.1 project export ZIP
+        // (verified against the working `nokey.zip` reference shipped with
+        // Talend Studio at C:/Program Files (x86)/Talend-Studio/studio/).
+        // That export contains EXACTLY:
+        //   ProjectName/
+        //     talend.project
+        //     .settings/project.settings        (~12 KB JSON, full real content)
+        //     .settings/migration_task.index    (~104 KB JSON, full migration list)
+        //     .settings/relationship.index      ([] is acceptable)
+        //     process/<job>_0.1.item
+        //     process/<job>_0.1.properties
+        // No .project Eclipse marker, no .prefs files, no empty marker dirs.
 
-        // 2) Talend project metadata
         entries.add(new Entry(projectDir + "/talend.project", projectXml.xml));
 
-        // 3) .settings/ directory — technicalStatus + log settings + Eclipse prefs
         entries.add(new Entry(projectDir + "/.settings/", null));
         entries.add(new Entry(projectDir + "/.settings/project.settings",
                 xmlWriter.writeProjectSettingsJson()));
-        entries.add(new Entry(projectDir + "/.settings/org.eclipse.core.resources.prefs",
-                xmlWriter.writeEclipseEncodingPrefs()));
-        entries.add(new Entry(projectDir + "/.settings/org.talend.repository.prefs",
-                xmlWriter.writeTalendRepoPrefs()));
-        entries.add(new Entry(projectDir + "/.settings/org.talend.designer.maven.prefs",
-                xmlWriter.writeMavenPrefs()));
+        entries.add(new Entry(projectDir + "/.settings/migration_task.index",
+                xmlWriter.writeMigrationTaskIndex()));
         entries.add(new Entry(projectDir + "/.settings/relationship.index",
                 xmlWriter.writeRelationshipIndex()));
 
-        // 4) Required empty directories
-        for (String d : new String[]{
-                "process", "context", "code/routines", "code/routines/system",
-                "metadata/connections", "metadata/file", "metadata/sapconnections",
-                "metadata/header_footer", "temp"}) {
-            entries.add(new Entry(projectDir + "/" + d + "/", null));
-        }
+        entries.add(new Entry(projectDir + "/process/", null));
 
         // 5) Job .item + .properties pairs
         if (jobs != null) {
