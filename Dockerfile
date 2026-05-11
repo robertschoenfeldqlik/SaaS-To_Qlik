@@ -48,7 +48,15 @@ RUN npm ci --omit=dev --no-audit --no-fund
 # primary, JRE addon — gives us a single explicit pin for both runtimes.
 FROM node:22-alpine
 
-RUN apk add --no-cache openjdk17-jre bash curl tini
+# Add the JRE for the Java engine and tini for proper PID 1 init. We also
+# remove the globally-installed npm: at runtime we only run `node` and
+# `java`, never `npm`, so leaving the bundled npm around just keeps its
+# transitive deps (e.g. picomatch) showing up in CVE scans for no reason.
+# Server + client modules are already installed in their respective build
+# stages and copied over below.
+RUN apk add --no-cache openjdk17-jre bash curl tini \
+ && npm uninstall -g npm 2>/dev/null || true \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 WORKDIR /opt/app
 
@@ -63,13 +71,24 @@ COPY app/server/package.json ./server/
 # React build (served by Express as static files)
 COPY --from=client-build /build/dist ./client/dist
 
-# Persistent data directory (SQLite + AI settings)
+# Persistent data directory (SQLite + AI settings + probe fixtures)
 RUN mkdir -p /opt/app/server/data
 VOLUME ["/opt/app/server/data"]
 
 # Boot script: starts Java engine + Express in background, keeps PID 1 alive
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# Hand ownership to the unprivileged 'node' user (uid 1000, pre-created by
+# node:alpine) and switch to it. The runtime never needs root after this —
+# both the Java engine and Express only listen on ports >1024 and write
+# only under /opt/app/server/data. Captured probe fixtures will be created
+# by uid 1000, so the named volume inherits those permissions on first
+# `docker run`. If you mount a host directory for the volume, that host
+# path must be writable by uid 1000 (or pass --user $(id -u):$(id -g)).
+RUN chown -R node:node /opt/app
+
+USER node
 
 ENV NODE_ENV=production \
     ENGINE_URL=http://localhost:8081 \

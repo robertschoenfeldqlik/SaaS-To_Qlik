@@ -93,13 +93,22 @@
         <dependency>
             <groupId>com.microsoft.sqlserver</groupId>
             <artifactId>mssql-jdbc</artifactId>
-            <version>12.6.1.jre11</version>
+            <!-- 12.10.2.jre11 — Microsoft's fixed list for CVE-2025-59250
+                 includes 12.6.5.jre11+, but Trivy reads the manifest as
+                 "12.6.5" without the jre11 suffix and matches against an
+                 unfixed entry. Bumping to 12.10.2.jre11 is unambiguous
+                 and stays in the 12.x major — no API changes for the
+                 JDBC URLs / connection options we use. -->
+            <version>12.10.2.jre11</version>
             <scope>runtime</scope>
         </dependency>
         <dependency>
             <groupId>net.snowflake</groupId>
             <artifactId>snowflake-jdbc</artifactId>
-            <version>3.16.1</version>
+            <!-- 3.22.0 fixes CVE-2025-24789 (untrusted search path on Windows).
+                 Stays within the 3.x major (4.x would be a breaking change
+                 to JDBC config — deferred). -->
+            <version>3.22.0</version>
             <scope>runtime</scope>
         </dependency>
         <dependency>

@@ -1,0 +1,17 @@
+# ═════════════════════════════════════════════════════════════════════════
+# Trivy CVE ignore list — each entry MUST include a clear reason and an
+# expiration date so we re-evaluate periodically.
+# ═════════════════════════════════════════════════════════════════════════
+
+# CVE-2025-59250 — Microsoft JDBC Driver for SQL Server improper input
+# validation. Microsoft's official fixed-version list:
+#   10.2.4.jre11, 11.2.4.jre11, 12.2.1.jre11, 12.6.5.jre11,
+#   12.8.2.jre11, 12.10.2.jre11, 13.2.1.jre11
+# We ship 12.10.2.jre11, which IS in the fixed list. Trivy reads the
+# JAR's pom.properties as "12.10.2" (without the .jre11 build suffix) and
+# matches that against an unfixed entry — a known Trivy bug with
+# Microsoft's jre-suffix versioning.
+# Verify manually: unzip -p engine.jar META-INF/maven/com.microsoft.sqlserver/mssql-jdbc/pom.properties
+# Revisit: 2026-12-31  (drop when Trivy fixes the version comparator,
+# or when we bump to mssql-jdbc 13.x major)
+CVE-2025-59250
