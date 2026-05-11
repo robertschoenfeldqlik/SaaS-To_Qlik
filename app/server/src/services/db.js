@@ -49,6 +49,8 @@ async function getDb() {
   // fixtures: captured API response payloads tied (optionally) to a project.
   // projectId NULLABLE because a user can probe from the wizard before
   // they've committed to creating a project.
+  // redacted/redactedCount track whether PHI/PII scrubbing was applied so
+  // a fixture can be re-identified as safe-to-share at a glance.
   db.run(`
     CREATE TABLE IF NOT EXISTS fixtures (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,9 +66,16 @@ async function getDb() {
       recordsPath TEXT,
       url TEXT,
       error TEXT,
+      redacted INTEGER DEFAULT 1,
+      redactedCount INTEGER DEFAULT 0,
+      redactedKeyPaths TEXT,
       createdAt TEXT DEFAULT (datetime('now'))
     )
   `);
+  // For pre-existing DBs from earlier deploys, add the new columns if missing.
+  try { db.run(`ALTER TABLE fixtures ADD COLUMN redacted INTEGER DEFAULT 1`); } catch (e) { /* already exists */ }
+  try { db.run(`ALTER TABLE fixtures ADD COLUMN redactedCount INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
+  try { db.run(`ALTER TABLE fixtures ADD COLUMN redactedKeyPaths TEXT`); } catch (e) { /* already exists */ }
   db.run(`CREATE INDEX IF NOT EXISTS idx_fixtures_project_endpoint
           ON fixtures(projectId, endpointName, capturedAt DESC)`);
 

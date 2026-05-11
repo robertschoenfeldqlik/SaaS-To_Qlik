@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CheckCircle2, AlertTriangle, Loader2, Radio, FileJson, Diff } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, Loader2, Radio, FileJson, Diff, ShieldCheck } from 'lucide-react';
 import { probeEndpoint } from '../../api/client';
 
 /**
@@ -94,6 +94,18 @@ export default function ProbePanel({
         </button>
       </div>
 
+      {/* Always-visible reassurance that captures are scrubbed before disk. */}
+      <div className="mt-3 p-2 rounded-lg text-xs flex items-start gap-2"
+           style={{ background: 'rgb(236 253 245)', color: 'rgb(6 78 59)' }}>
+        <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+        <span>
+          <strong>PHI / PII redaction on:</strong> emails, phone numbers, SSN-like values,
+          and fields named like <code>name</code>, <code>address</code>, <code>dob</code>,
+          <code>patient_id</code>, etc. are replaced with placeholders before fixtures
+          are written to disk. Schema and types are preserved so diffs still work.
+        </span>
+      </div>
+
       {error && (
         <div className="mt-3 p-3 rounded-lg text-sm flex items-start gap-2"
              style={{ background: 'rgb(254 226 226)', color: 'rgb(127 29 29)' }}>
@@ -156,6 +168,20 @@ function ProbeResultRow({ endpoint, result, onRerun }) {
         {result.elapsedMs != null && (
           <span className="text-xs" style={{ color: 'rgb(var(--color-text-secondary))' }}>
             · {result.elapsedMs} ms
+          </span>
+        )}
+        {result.redacted && (
+          <span className="px-1.5 py-0.5 rounded text-xs font-mono flex items-center gap-1"
+                title={(result.redactedKeyPaths || []).slice(0, 20).join(', ')
+                       || 'No PHI/PII patterns matched in this payload'}
+                style={{
+                  background: 'rgb(236 253 245)',
+                  color: 'rgb(6 78 59)',
+                }}>
+            <ShieldCheck className="w-3 h-3" />
+            {result.redactedCount > 0
+              ? `${result.redactedCount} redacted`
+              : 'redacted'}
           </span>
         )}
         <button onClick={onRerun} className="ml-auto btn-ghost text-xs">Re-probe</button>

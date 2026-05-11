@@ -38,4 +38,17 @@ public class ProbeRequest {
     /** HTTP timeout in milliseconds for the probe call. */
     @Builder.Default
     private int timeoutMs = 30_000;
+
+    /**
+     * When true (default), PHI/PII values are redacted before the body is
+     * persisted to disk AND before the responseExcerpt is returned. Field
+     * names + types survive — only values are scrubbed — so the diff
+     * comparator still works.
+     *
+     * Setting this to false captures the raw payload — only do this in
+     * environments where the API definitely returns no real personal data
+     * (e.g. against a synthetic-data sandbox).
+     */
+    @Builder.Default
+    private boolean redact = true;
 }

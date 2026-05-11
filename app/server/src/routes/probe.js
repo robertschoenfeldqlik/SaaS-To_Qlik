@@ -41,7 +41,7 @@ router.use(async (req, res, next) => {
  * Returns the engine's ProbeResponse plus { fixtureId } if persisted.
  */
 router.post('/', async (req, res) => {
-  const { projectId, endpoint, authConfig, baseUrl } = req.body || {};
+  const { projectId, endpoint, authConfig, baseUrl, redact } = req.body || {};
   if (!endpoint || !baseUrl) {
     return res.status(400).json({ error: 'endpoint and baseUrl are required' });
   }
@@ -59,6 +59,8 @@ router.post('/', async (req, res) => {
       baseUrl,
       saveFixture: true,
       fixtureKey,
+      // Default: ON. Caller can disable for synthetic-data sandboxes only.
+      redact: redact !== false,
     }, { timeout: 60_000 });
 
     const probe = engineResp.data;
@@ -71,8 +73,9 @@ router.post('/', async (req, res) => {
         `INSERT INTO fixtures
            (projectId, endpointName, fixturePath, capturedAt,
             statusCode, recordCount, elapsedMs, bodyBytes,
-            fieldsJson, recordsPath, url, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            fieldsJson, recordsPath, url, error,
+            redacted, redactedCount, redactedKeyPaths)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           projectId,
           probe.endpointName || endpoint.name,
@@ -86,6 +89,9 @@ router.post('/', async (req, res) => {
           endpoint.recordsPath || null,
           probe.url || null,
           probe.error || null,
+          probe.redacted ? 1 : 0,
+          probe.redactedCount || 0,
+          JSON.stringify(probe.redactedKeyPaths || []),
         ],
       );
       fixtureId = ins.lastId;
@@ -147,13 +153,12 @@ router.post('/compare', async (req, res) => {
 /** GET /api/probe/fixtures?projectId=N — list fixtures (newest first). */
 router.get('/fixtures', (req, res) => {
   const projectId = req.query.projectId ? parseInt(req.query.projectId, 10) : null;
+  const baseCols = `id, projectId, endpointName, fixturePath, capturedAt,
+                    statusCode, recordCount, elapsedMs, bodyBytes, recordsPath,
+                    url, error, redacted, redactedCount`;
   const sql = projectId
-    ? `SELECT id, projectId, endpointName, fixturePath, capturedAt,
-              statusCode, recordCount, elapsedMs, bodyBytes, recordsPath, url, error
-         FROM fixtures WHERE projectId = ? ORDER BY capturedAt DESC LIMIT 200`
-    : `SELECT id, projectId, endpointName, fixturePath, capturedAt,
-              statusCode, recordCount, elapsedMs, bodyBytes, recordsPath, url, error
-         FROM fixtures ORDER BY capturedAt DESC LIMIT 200`;
+    ? `SELECT ${baseCols} FROM fixtures WHERE projectId = ? ORDER BY capturedAt DESC LIMIT 200`
+    : `SELECT ${baseCols} FROM fixtures ORDER BY capturedAt DESC LIMIT 200`;
   const rows = queryAll(sql, projectId ? [projectId] : []);
   res.json(rows);
 });

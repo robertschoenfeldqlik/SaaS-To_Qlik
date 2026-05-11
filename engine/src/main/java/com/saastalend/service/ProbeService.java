@@ -48,6 +48,7 @@ public class ProbeService {
     private static final Logger log = LoggerFactory.getLogger(ProbeService.class);
 
     private final FixtureStore fixtureStore;
+    private final RedactionService redactionService;
     private final ObjectMapper mapper = new ObjectMapper();
     private final Configuration jsonPathConfig = Configuration.builder()
             .options(Option.SUPPRESS_EXCEPTIONS, Option.DEFAULT_PATH_LEAF_TO_NULL)
@@ -58,8 +59,9 @@ public class ProbeService {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
 
-    public ProbeService(FixtureStore fixtureStore) {
+    public ProbeService(FixtureStore fixtureStore, RedactionService redactionService) {
         this.fixtureStore = fixtureStore;
+        this.redactionService = redactionService;
     }
 
     public ProbeResponse probe(ProbeRequest req) {
@@ -127,25 +129,56 @@ public class ProbeService {
             body = body.substring(0, (int) Math.min(maxBytes, Integer.MAX_VALUE));
         }
 
+        // ── Redaction pass: walk the parsed body, scrub PHI/PII values ─────
+        // This MUST happen before any persistence or before we put bytes into
+        // the response excerpt. Field names + types are preserved so the
+        // schema diff still works against future captures.
+        String bodyForPersist = body;
+        JsonNode parsedRoot = null;
+        if (req.isRedact()) {
+            try {
+                parsedRoot = mapper.readTree(body);
+                RedactionService.RedactionReport rep = redactionService.redact(parsedRoot, null);
+                if (rep.getRedacted() != null) {
+                    parsedRoot = rep.getRedacted();
+                    bodyForPersist = mapper.writeValueAsString(parsedRoot);
+                }
+                out.redacted(true)
+                        .redactedCount(rep.getRedactedCount())
+                        .redactedKeyPaths(rep.getRedactedKeyPaths());
+            } catch (Exception parseFail) {
+                // Non-JSON body — can't redact structurally. Fail closed:
+                // drop the body to placeholder rather than persisting raw text
+                // that might contain PHI (e.g. a stack-trace HTML error page).
+                log.info("Body not JSON, applying coarse text redaction");
+                bodyForPersist = "[REDACTED-NON-JSON-BODY]";
+                out.redacted(true).redactedCount(1);
+            }
+        } else {
+            out.redacted(false);
+        }
+
         if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
             // Still useful — capture the error body so the user can see auth failures, etc.
             out.error("HTTP " + resp.statusCode())
-                    .responseExcerpt(excerpt(body, 1024));
-            // Save error fixture too — they're often what surfaces auth regressions
+                    .responseExcerpt(excerpt(bodyForPersist, 1024));
+            // Save error fixture too — they're often what surfaces auth regressions.
+            // We persist bodyForPersist (already redacted if redact=true).
             if (req.isSaveFixture()) {
-                trySave(req, body, out);
+                trySave(req, bodyForPersist, out);
             }
             return out.build();
         }
 
-        // ── Parse + shape detection via JSONPath ──────────────────────────
+        // ── Parse + shape detection via JSONPath (against the REDACTED tree)
+        // so the excerpt sent to the UI never carries raw PHI. ────────────
         String recordsPath = ep.getRecordsPath() != null && !ep.getRecordsPath().isBlank()
                 ? ep.getRecordsPath()
                 : "$";
         try {
             Object resolved = JsonPath
                     .using(jsonPathConfig)
-                    .parse(body)
+                    .parse(bodyForPersist)  // redacted variant
                     .read(recordsPath);
 
             JsonNode firstRecord = null;
@@ -172,17 +205,17 @@ public class ProbeService {
             } else if (firstRecord != null) {
                 out.responseExcerpt(excerpt(mapper.writeValueAsString(firstRecord), 1024));
             } else {
-                out.responseExcerpt(excerpt(body, 1024));
+                out.responseExcerpt(excerpt(bodyForPersist, 1024));
             }
         } catch (Exception e) {
             log.warn("JSONPath resolve failed for {} : {}", recordsPath, e.getMessage());
             out.recordCount(-1)
-                    .responseExcerpt(excerpt(body, 1024));
+                    .responseExcerpt(excerpt(bodyForPersist, 1024));
         }
 
-        // ── Persist fixture (full body — diffing later needs the raw text) ─
+        // ── Persist the REDACTED body — never the raw bytes when redact=true.
         if (req.isSaveFixture()) {
-            trySave(req, body, out);
+            trySave(req, bodyForPersist, out);
         }
         return out.build();
     }

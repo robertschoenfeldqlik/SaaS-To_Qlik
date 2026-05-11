@@ -52,4 +52,17 @@ public class ProbeResponse {
 
     /** Non-null on failure; statusCode may still be set (e.g. 401, 500). */
     private String error;
+
+    /** True when PHI/PII redaction was applied before saving. */
+    private boolean redacted;
+
+    /** Number of values that were scrubbed (field-name match OR value-pattern hit). */
+    private int redactedCount;
+
+    /**
+     * Dot-paths of redacted keys (capped — full list lives in the fixture
+     * if needed). Useful for the UI to summarize "redacted: email, ssn, …".
+     */
+    @Builder.Default
+    private List<String> redactedKeyPaths = new ArrayList<>();
 }
