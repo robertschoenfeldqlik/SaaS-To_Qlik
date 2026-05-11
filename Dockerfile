@@ -26,7 +26,7 @@ RUN mvn -B -q package -DskipTests \
  && cp target/saas-talend-engine-*.jar /build/engine.jar
 
 # ─── STAGE 2: build the React client ───────────────────────────────────────
-FROM node:20-alpine AS client-build
+FROM node:22-alpine AS client-build
 WORKDIR /build
 COPY app/client/package*.json ./
 RUN npm ci --no-audit --no-fund
@@ -34,18 +34,21 @@ COPY app/client .
 RUN npm run build
 
 # ─── STAGE 3: server deps only (cacheable) ─────────────────────────────────
-FROM node:20-alpine AS server-deps
+FROM node:22-alpine AS server-deps
 WORKDIR /build
 COPY app/server/package*.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
 # ─── FINAL STAGE: runtime image ────────────────────────────────────────────
-# Eclipse Temurin JRE 17 (Alpine) + Node.js 20 side-by-side
-FROM eclipse-temurin:17-jre-alpine
+# Use the official node:22-alpine base (pins Node to the 22.x LTS line) and
+# add OpenJDK 17 JRE on top. Earlier versions of this Dockerfile based on
+# eclipse-temurin:17-jre-alpine + `apk add nodejs` silently drifted to
+# whatever node version Alpine shipped (we observed v24 in production
+# while the build stages were pinned to 20). Inverting the base — Node
+# primary, JRE addon — gives us a single explicit pin for both runtimes.
+FROM node:22-alpine
 
-# Install Node.js 20 and a minimal process manager
-# (Alpine 3.19+ ships nodejs 20 as default; if running on older base, switch tag)
-RUN apk add --no-cache nodejs npm bash curl tini
+RUN apk add --no-cache openjdk17-jre bash curl tini
 
 WORKDIR /opt/app
 
