@@ -3,6 +3,7 @@ import SourceTypePicker from '../components/discovery/SourceTypePicker';
 import ApiSourceWizard from '../components/discovery/ApiSourceWizard';
 import DatabaseSourceWizard from '../components/discovery/DatabaseSourceWizard';
 import DbtSourceWizard from '../components/discovery/DbtSourceWizard';
+import NonProdWarningBanner from '../components/shared/NonProdWarningBanner';
 import { ArrowLeft } from 'lucide-react';
 
 export default function DiscoveryPage() {
@@ -28,6 +29,8 @@ export default function DiscoveryPage() {
 
   return (
     <div className="p-8 max-w-5xl mx-auto animate-fade-in-up">
+      <NonProdWarningBanner />
+
       <div className="mb-6 flex items-center gap-3">
         {sourceType && (
           <button onClick={() => setSourceType(null)} className="btn-ghost flex items-center gap-1.5 text-sm">

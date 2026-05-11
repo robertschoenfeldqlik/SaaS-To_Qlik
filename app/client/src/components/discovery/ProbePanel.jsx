@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { CheckCircle2, AlertTriangle, Loader2, Radio, FileJson, Diff, ShieldCheck } from 'lucide-react';
 import { probeEndpoint } from '../../api/client';
+import NonProdWarningBanner from '../shared/NonProdWarningBanner';
 
 /**
  * Optional step that sits between "Endpoints + Auth configured" and "Generate".
@@ -94,16 +95,28 @@ export default function ProbePanel({
         </button>
       </div>
 
-      {/* Always-visible reassurance that captures are scrubbed before disk. */}
-      <div className="mt-3 p-2 rounded-lg text-xs flex items-start gap-2"
-           style={{ background: 'rgb(236 253 245)', color: 'rgb(6 78 59)' }}>
-        <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-        <span>
-          <strong>PHI / PII redaction on:</strong> emails, phone numbers, SSN-like values,
-          and fields named like <code>name</code>, <code>address</code>, <code>dob</code>,
-          <code>patient_id</code>, etc. are replaced with placeholders before fixtures
-          are written to disk. Schema and types are preserved so diffs still work.
-        </span>
+      {/* Non-production warning — sits above the redaction note so the
+          stronger advice gets read first. Dismissible per session via its
+          own storageKey so it can be hidden independently of the page-level
+          banner on DiscoveryPage. */}
+      <div className="mt-3 space-y-2">
+        <NonProdWarningBanner
+          variant="inline"
+          storageKey="probePanel.nonProdWarning.dismissed"
+        />
+
+        {/* Reassurance that captures are scrubbed before disk. */}
+        <div className="p-2 rounded-lg text-xs flex items-start gap-2"
+             style={{ background: 'rgb(236 253 245)', color: 'rgb(6 78 59)' }}>
+          <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span>
+            <strong>PHI / PII redaction on:</strong> emails, phone numbers, SSN-like values,
+            and fields named like <code>name</code>, <code>address</code>, <code>dob</code>,
+            <code>patient_id</code>, etc. are replaced with placeholders before fixtures
+            are written to disk. Schema and types are preserved so diffs still work.
+            <strong> Even with redaction on, only point this at non-production data.</strong>
+          </span>
+        </div>
       </div>
 
       {error && (

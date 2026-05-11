@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   BookOpen, Globe, Database, Workflow, Brain, Download, Terminal,
   FileCode, Copy, Check, ChevronDown, ChevronRight, Lightbulb, Key,
-  Server, Layers, Shield,
+  Server, Layers, Shield, AlertTriangle,
 } from 'lucide-react';
 
 /**
@@ -501,6 +501,54 @@ export default function HelpPage() {
     models/staging/stg_*.sql`}</CodeBlock>
           <p>In Talend Studio: <strong>File → Import items</strong> → select the ZIP → all jobs + context variables appear in the repository.</p>
         </div>
+      </Section>
+
+      {/* ── Data handling / non-prod policy ──────────────────── */}
+      <Section icon={AlertTriangle} title="Data handling — do NOT use production data" accent="amber" defaultOpen={true}>
+        <div className="p-3 mb-3 rounded-lg border-2"
+             style={{
+               background: 'rgb(254 243 199)',
+               color: 'rgb(120 53 15)',
+               borderColor: 'rgb(252 211 77)',
+             }}>
+          <strong>Connect this tool to a sandbox, staging, or test tenant — never a live production system that contains real customer records.</strong>
+        </div>
+        <p className="text-sm mb-2" style={{ color: 'rgb(var(--color-text-secondary))' }}>
+          When you probe an endpoint or run a generated Talend job, real data from
+          whatever API base URL you provide flows through this tool. Two surfaces
+          can persist data to the volume-mounted filesystem at
+          <code> /opt/app/server/data/fixtures</code>:
+        </p>
+        <ul className="text-sm list-disc pl-6 space-y-1" style={{ color: 'rgb(var(--color-text-secondary))' }}>
+          <li><strong>Probe captures</strong> — when you click "Probe with real call" on the API wizard, the HTTP response body is saved as a fixture so you can later diff future captures for schema drift.</li>
+          <li><strong>Error responses</strong> — 4xx / 5xx bodies are also saved (often useful for diagnosing auth regressions), and may contain identifying info.</li>
+        </ul>
+        <p className="text-sm mt-3 mb-2" style={{ color: 'rgb(var(--color-text-secondary))' }}>
+          <strong style={{ color: 'rgb(var(--color-text))' }}>What redaction does</strong> — by default, fixtures are scrubbed in
+          two passes before they hit disk:
+        </p>
+        <ul className="text-sm list-disc pl-6 space-y-1" style={{ color: 'rgb(var(--color-text-secondary))' }}>
+          <li><strong>Field-name match</strong> on keys like <code>name</code>, <code>email</code>, <code>phone</code>, <code>ssn</code>, <code>dob</code>, <code>address</code>, <code>zip</code>, <code>mrn</code>, <code>patient_id</code>, <code>diagnosis</code>, <code>card_number</code>, <code>ip_address</code>, <code>password</code>, <code>token</code>, etc. → the value is replaced with <code>[REDACTED]</code> (or <code>0</code> / <code>false</code> / <code>[]</code> / <code>{'{}'}</code> to preserve the original JSON type for diffing).</li>
+          <li><strong>Value-pattern match</strong> on regexes for email shape, US SSN (<code>NNN-NN-NNNN</code>), US phone, credit-card-shaped digit runs, IPv4 — applied to every string regardless of key, so PII inside a <code>notes</code> or <code>comment</code> column is caught.</li>
+        </ul>
+        <p className="text-sm mt-3" style={{ color: 'rgb(var(--color-text-secondary))' }}>
+          <strong style={{ color: 'rgb(var(--color-text))' }}>What redaction does NOT guarantee</strong> — pattern-based scrubbing
+          is best-effort. It cannot catch sensitive data hidden in unusual field
+          names (e.g. <code>cust_ref_x9</code>), free-text descriptions without a
+          recognizable shape, base64-encoded payloads, or values inside arrays that
+          we recurse into without further inspection. Treat fixtures as
+          <em> redacted, not anonymized to a regulatory standard</em>. They should
+          not leave your environment and should not be assumed safe to share.
+        </p>
+        <p className="text-sm mt-3" style={{ color: 'rgb(var(--color-text-secondary))' }}>
+          <strong style={{ color: 'rgb(var(--color-text))' }}>Practical guidance</strong>:
+        </p>
+        <ul className="text-sm list-disc pl-6 space-y-1" style={{ color: 'rgb(var(--color-text-secondary))' }}>
+          <li>Use a sandbox / dev tenant with synthetic data wherever possible.</li>
+          <li>If you must point at a real environment, use a read-only credential scoped to a single non-PHI endpoint.</li>
+          <li>The fixtures volume is named <code>saas-talend-data</code>. To wipe captures: <code>docker volume rm saas-talend-data</code> (will also remove the SQLite project DB).</li>
+          <li>For synthetic-data sandboxes where redaction is unnecessary, the probe API accepts <code>{'{ "redact": false }'}</code> to bypass scrubbing.</li>
+        </ul>
       </Section>
 
       {/* ── Context Variables ────────────────────────────────── */}
