@@ -58,8 +58,9 @@ export default function SettingsPage() {
   // Live Ollama state — fetched from the user's actual instance, not hardcoded
   const [ollamaModels, setOllamaModels] = useState([]);    // [{name, parameterSize, ...}]
   const [ollamaLoading, setOllamaLoading] = useState(false);
-  const [ollamaError, setOllamaError] = useState(null);    // { error, hint, resolvedBaseUrl }
-  const [ollamaDiagnose, setOllamaDiagnose] = useState(null); // { inContainer, resolvedBaseUrl }
+  const [ollamaError, setOllamaError] = useState(null);    // { error, hint, attempts }
+  const [ollamaDiagnose, setOllamaDiagnose] = useState(null); // { inContainer, resolvedBaseUrl, candidates }
+  const [ollamaResolvedUrl, setOllamaResolvedUrl] = useState(null); // url that actually worked
 
   // Pattern matches the server's GET /settings redaction format.
   const isRedactedKey = (s) => {
@@ -81,11 +82,13 @@ export default function SettingsPage() {
       setOllamaModels([]);
       setOllamaError(null);
       setOllamaDiagnose(null);
+      setOllamaResolvedUrl(null);
       return;
     }
     const t = setTimeout(async () => {
       setOllamaLoading(true);
       setOllamaError(null);
+      setOllamaResolvedUrl(null);
       try {
         const [diag, models] = await Promise.all([
           diagnoseOllama(aiBaseUrl || undefined).catch(() => null),
@@ -94,16 +97,18 @@ export default function SettingsPage() {
         if (diag) setOllamaDiagnose(diag);
         if (models.ok) {
           setOllamaModels(models.models || []);
+          setOllamaResolvedUrl(models.resolvedBaseUrl);
         } else {
           setOllamaModels([]);
           setOllamaError({
             error: models.error,
             hint: models.hint,
+            attempts: models.attempts || [],
             resolvedBaseUrl: models.resolvedBaseUrl,
           });
         }
       } catch (err) {
-        setOllamaError({ error: err.message });
+        setOllamaError({ error: err.message, attempts: [] });
       } finally {
         setOllamaLoading(false);
       }
@@ -334,24 +339,43 @@ export default function SettingsPage() {
               }
             </select>
             {aiProvider === 'ollama' && ollamaError && (
-              <div className="mt-2 p-2 rounded-lg text-xs flex items-start gap-2"
+              <div className="mt-2 p-3 rounded-lg text-xs flex items-start gap-2"
                    style={{ background: 'rgb(254 243 199)', color: 'rgb(120 53 15)' }}>
                 <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                <div>
-                  <div><strong>Couldn't reach Ollama at {ollamaError.resolvedBaseUrl}</strong></div>
-                  {ollamaError.hint && <div className="mt-1">{ollamaError.hint}</div>}
+                <div className="flex-1">
+                  <div className="font-semibold">Couldn't reach Ollama on any tried URL</div>
+                  {ollamaError.attempts && ollamaError.attempts.length > 0 && (
+                    <ul className="mt-1.5 space-y-0.5 font-mono text-[11px]">
+                      {ollamaError.attempts.map((a, i) => (
+                        <li key={i} className="flex items-center gap-1.5">
+                          <XCircle className="w-3 h-3" />
+                          {a.url} <span className="opacity-70">— {a.error}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {ollamaError.hint && (
+                    <div className="mt-2 leading-relaxed">{ollamaError.hint}</div>
+                  )}
+                  {ollamaDiagnose?.inContainer && (
+                    <div className="mt-2 leading-relaxed">
+                      <strong>Most common cause when this server is in Docker:</strong>{' '}
+                      Ollama on the host is bound to <code>127.0.0.1:11434</code> (its
+                      default). Stop Ollama, set the env var{' '}
+                      <code>OLLAMA_HOST=0.0.0.0:11434</code>, then restart it.
+                    </div>
+                  )}
                 </div>
               </div>
             )}
-            {aiProvider === 'ollama' && ollamaDiagnose?.inContainer && !ollamaError && (
+            {aiProvider === 'ollama' && ollamaDiagnose?.inContainer && !ollamaError && ollamaResolvedUrl && (
               <div className="mt-2 p-2 rounded-lg text-xs flex items-start gap-2"
                    style={{ background: 'rgb(219 234 254)', color: 'rgb(30 58 138)' }}>
                 <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
                 <span>
-                  This server is running inside Docker. <code>localhost</code> /{' '}
-                  <code>127.0.0.1</code> are auto-rewritten to{' '}
-                  <code>host.docker.internal</code> so your host's Ollama is
-                  reachable — currently <code>{ollamaDiagnose.resolvedBaseUrl}</code>.
+                  This server runs inside Docker. Connected via{' '}
+                  <code>{ollamaResolvedUrl}</code> (tried {ollamaDiagnose.candidates?.length || 1}{' '}
+                  candidate URL{(ollamaDiagnose.candidates?.length || 1) === 1 ? '' : 's'}).
                 </span>
               </div>
             )}

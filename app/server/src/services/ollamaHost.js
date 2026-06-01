@@ -73,4 +73,87 @@ function resolveOllamaUrl(userUrl) {
   }
 }
 
-module.exports = { resolveOllamaUrl, defaultOllamaUrl, inContainer };
+/**
+ * Build an ordered list of candidate Ollama URLs to try. The first one that
+ * responds wins.
+ *
+ *   - If the user gave a URL, try it as-is first.
+ *   - Then try the localhost-rewritten variant (if applicable).
+ *   - Then host.docker.internal and the Docker bridge gateway (172.17.0.1).
+ *   - Always include localhost as a final fallback (host network mode).
+ *
+ * Deduplicates and strips trailing slashes.
+ */
+function candidatesForOllama(userUrl) {
+  const list = [];
+
+  function add(url) {
+    if (!url) return;
+    const cleaned = url.replace(/\/+$/, '');
+    if (!list.includes(cleaned)) list.push(cleaned);
+  }
+
+  if (userUrl && userUrl.trim()) {
+    const raw = userUrl.trim();
+    add(raw);
+    try {
+      const u = new URL(raw);
+      if (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '0.0.0.0') {
+        // Add the docker-internal rewrite as a second candidate
+        const r = new URL(raw);
+        r.hostname = 'host.docker.internal';
+        add(r.toString());
+      }
+    } catch (_) {}
+  }
+
+  if (inContainer()) {
+    add('http://host.docker.internal:11434');
+    if (process.env.OLLAMA_HOST_OVERRIDE) {
+      add(`http://${process.env.OLLAMA_HOST_OVERRIDE}:11434`);
+    }
+    // Common Docker bridge gateway on Linux Docker
+    add('http://172.17.0.1:11434');
+  }
+
+  // Always include localhost as a last-resort (host network mode, or running
+  // outside Docker entirely)
+  add('http://localhost:11434');
+
+  return list;
+}
+
+/**
+ * Probe candidates in order, returning the first that responds.
+ *
+ * @returns {Promise<{success: boolean, url?: string, models?: Array, attempts: Array}>}
+ *   attempts: [{url, ok, error?, status?}, ...] — full trace for the UI
+ */
+async function probeOllama(userUrl, axios, timeoutMs = 3000) {
+  const candidates = candidatesForOllama(userUrl);
+  const attempts = [];
+
+  for (const url of candidates) {
+    try {
+      const resp = await axios.get(`${url}/api/tags`, { timeout: timeoutMs });
+      attempts.push({ url, ok: true, status: resp.status });
+      return { success: true, url, models: resp.data.models || [], attempts };
+    } catch (e) {
+      attempts.push({
+        url,
+        ok: false,
+        error: e.code || e.message,
+        status: e.response?.status,
+      });
+    }
+  }
+  return { success: false, attempts };
+}
+
+module.exports = {
+  resolveOllamaUrl,
+  defaultOllamaUrl,
+  inContainer,
+  candidatesForOllama,
+  probeOllama,
+};

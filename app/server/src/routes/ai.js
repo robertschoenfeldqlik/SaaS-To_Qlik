@@ -3,7 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const logger = require('../logger');
-const { resolveOllamaUrl, defaultOllamaUrl, inContainer } = require('../services/ollamaHost');
+const { resolveOllamaUrl, defaultOllamaUrl, inContainer, probeOllama, candidatesForOllama } = require('../services/ollamaHost');
 
 const router = express.Router();
 
@@ -698,10 +698,10 @@ router.post('/generate-config', async (req, res) => {
  */
 router.get('/ollama/models', async (req, res) => {
   const userUrl = req.query.baseUrl || aiSettings.baseUrl;
-  const resolvedBaseUrl = resolveOllamaUrl(userUrl);
-  try {
-    const resp = await axios.get(`${resolvedBaseUrl}/api/tags`, { timeout: 5000 });
-    const models = (resp.data.models || []).map((m) => ({
+  const result = await probeOllama(userUrl, axios, 3000);
+
+  if (result.success) {
+    const models = (result.models || []).map((m) => ({
       name: m.name,
       size: m.size,
       digest: m.digest,
@@ -710,29 +710,37 @@ router.get('/ollama/models', async (req, res) => {
       quantization: m.details?.quantization_level,
       family: m.details?.family,
     }));
-    res.json({
+    return res.json({
       ok: true,
-      resolvedBaseUrl,
+      resolvedBaseUrl: result.url,
       inContainer: inContainer(),
+      attempts: result.attempts,
       models,
     });
-  } catch (err) {
-    let hint;
-    if (err.code === 'ECONNREFUSED') {
-      hint = inContainer()
-        ? `Tried ${resolvedBaseUrl}. From inside Docker, your host Ollama is reachable as host.docker.internal:11434 — make sure 'ollama serve' is running on the host.`
-        : `Tried ${resolvedBaseUrl}. Is Ollama running? Start it with: ollama serve`;
-    } else if (err.code === 'ENOTFOUND') {
-      hint = `Host '${new URL(resolvedBaseUrl).hostname}' could not be resolved. On Linux Docker, you may need to start with --add-host=host.docker.internal:host-gateway, or set OLLAMA_HOST_OVERRIDE to your bridge gateway IP.`;
-    }
-    res.json({
-      ok: false,
-      resolvedBaseUrl,
-      inContainer: inContainer(),
-      error: err.message,
-      hint,
-    });
   }
+
+  // No candidate responded — build a useful hint
+  const triedList = result.attempts.map((a) => `${a.url} (${a.error})`).join('; ');
+  let hint;
+  if (inContainer()) {
+    hint = `Tried: ${triedList}. ` +
+           `Your Ollama on the host must (1) be running (\`ollama serve\`), ` +
+           `and (2) be bound to 0.0.0.0:11434 — by default it listens on 127.0.0.1 ` +
+           `which Docker can't reach. Set OLLAMA_HOST=0.0.0.0:11434 in Ollama's ` +
+           `environment, then restart Ollama. On Linux Docker, also start this ` +
+           `container with --add-host=host.docker.internal:host-gateway.`;
+  } else {
+    hint = `Tried: ${triedList}. Is Ollama running? Start it with: ollama serve`;
+  }
+
+  res.json({
+    ok: false,
+    resolvedBaseUrl: result.attempts[0]?.url,
+    inContainer: inContainer(),
+    attempts: result.attempts,
+    error: 'No reachable Ollama endpoint',
+    hint,
+  });
 });
 
 /**
@@ -743,12 +751,17 @@ router.get('/ollama/models', async (req, res) => {
  * informative hint without making a real call.
  */
 router.get('/ollama/diagnose', (req, res) => {
+  // Match the source of userUrl used by /ollama/models so the UI sees the
+  // same candidate ordering.
+  const userUrl = req.query.baseUrl || aiSettings.baseUrl;
+  const candidates = candidatesForOllama(userUrl);
   res.json({
     inContainer: inContainer(),
     defaultBaseUrl: defaultOllamaUrl(),
-    resolvedBaseUrl: resolveOllamaUrl(req.query.baseUrl),
+    resolvedBaseUrl: candidates[0],  // first candidate is "preferred"
+    candidates,                       // all URLs that will be tried in order
     note: inContainer()
-      ? 'Running inside Docker. localhost / 127.0.0.1 are auto-rewritten to host.docker.internal so your host Ollama is reachable.'
+      ? 'Running inside Docker. The server tries multiple candidate URLs in order — host.docker.internal, the Docker bridge gateway (172.17.0.1), and localhost — and uses whichever responds first. Your host Ollama must be running AND bound to 0.0.0.0:11434 (not just 127.0.0.1) for Docker to reach it.'
       : 'Running outside Docker. localhost:11434 works directly.',
   });
 });
