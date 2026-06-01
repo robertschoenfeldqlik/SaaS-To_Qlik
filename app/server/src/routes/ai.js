@@ -416,7 +416,7 @@ async function callOllama(systemPrompt, userMessage, config) {
   // we get back the live installed-models list in one round-trip. Saves us
   // from the previous bug where we defaulted to "llama3.1" — a model most
   // users haven't pulled — and got a confusing HTTP 404 back.
-  const probe = await probeOllama(config.baseUrl, axios, 5000);
+  const probe = await probeOllama(config.baseUrl, axios);
   if (!probe.success) {
     const err = new Error('Ollama is not reachable on any candidate URL');
     err.code = 'OLLAMA_UNREACHABLE';
@@ -932,7 +932,7 @@ router.post('/generate-config', async (req, res) => {
  */
 router.get('/ollama/models', async (req, res) => {
   const userUrl = req.query.baseUrl || aiSettings.baseUrl;
-  const result = await probeOllama(userUrl, axios, 3000);
+  const result = await probeOllama(userUrl, axios);
 
   if (result.success) {
     const models = (result.models || []).map((m) => ({
@@ -1071,7 +1071,7 @@ router.post('/test-connection', async (req, res) => {
       // Use the multi-candidate probe so we get the same fallback chain as
       // /api/ai/ollama/models. resolveOllamaUrl alone wouldn't handle Linux
       // Docker or restrictive setups.
-      const probe = await probeOllama(config.baseUrl, axios, 5000);
+      const probe = await probeOllama(config.baseUrl, axios);
       if (!probe.success) {
         return res.json({
           success: false,

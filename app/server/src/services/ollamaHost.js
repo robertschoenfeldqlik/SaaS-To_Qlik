@@ -126,25 +126,80 @@ function candidatesForOllama(userUrl) {
 /**
  * Probe candidates in order, returning the first that responds.
  *
+ * @param userUrl    optional user-supplied base URL
+ * @param axios      axios instance
+ * @param timeoutMs  per-attempt HTTP timeout (default 15s, see note)
+ *
+ * Default timeout is 15 seconds because the cheap-looking `/api/tags`
+ * endpoint can actually block for many seconds if Ollama is busy
+ * cold-loading a model into RAM (large GGUF + slow disk). A 3s timeout
+ * was producing false "Ollama unreachable" errors in exactly that
+ * window. 15s is a reasonable upper bound that still catches genuinely
+ * dead candidates quickly.
+ *
+ * If the FIRST candidate fails with a timeout (not a refused/DNS
+ * error), retry it once before falling through to the next candidate.
+ * This is the most common case: user supplied the right URL but
+ * Ollama is mid-load.
+ *
  * @returns {Promise<{success: boolean, url?: string, models?: Array, attempts: Array}>}
  *   attempts: [{url, ok, error?, status?}, ...] — full trace for the UI
  */
-async function probeOllama(userUrl, axios, timeoutMs = 3000) {
+async function probeOllama(userUrl, axios, timeoutMs = 15_000) {
   const candidates = candidatesForOllama(userUrl);
   const attempts = [];
 
-  for (const url of candidates) {
-    try {
-      const resp = await axios.get(`${url}/api/tags`, { timeout: timeoutMs });
-      attempts.push({ url, ok: true, status: resp.status });
-      return { success: true, url, models: resp.data.models || [], attempts };
-    } catch (e) {
-      attempts.push({
-        url,
-        ok: false,
-        error: e.code || e.message,
-        status: e.response?.status,
-      });
+  // Two retry categories:
+  //   TRANSIENT_CODES — almost always recover after a brief wait
+  //     EAI_AGAIN: DNS resolver said "try again" (very common on
+  //                fresh containers where Docker's internal DNS
+  //                hasn't fully populated for host.docker.internal).
+  //   TIMEOUT_CODES — Ollama is up but cold-loading a model
+  //     ECONNABORTED / ETIMEDOUT: /api/tags itself blocked
+  //
+  // Refused / ENOTFOUND / etc. are PERMANENT for that URL — move on
+  // immediately to the next candidate.
+  const TIMEOUT_CODES   = new Set(['ECONNABORTED', 'ETIMEDOUT']);
+  const TRANSIENT_CODES = new Set(['EAI_AGAIN']);
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  for (let i = 0; i < candidates.length; i++) {
+    const url = candidates[i];
+    const isFirst = i === 0;
+
+    // First candidate gets 2 attempts on timeout (cold-load), ANY candidate
+    // gets 2 attempts on a transient DNS error (EAI_AGAIN).
+    for (let attemptNum = 1; attemptNum <= 2; attemptNum++) {
+      try {
+        const resp = await axios.get(`${url}/api/tags`, { timeout: timeoutMs });
+        attempts.push({ url, ok: true, status: resp.status, retry: attemptNum > 1 });
+        return { success: true, url, models: resp.data.models || [], attempts };
+      } catch (e) {
+        const code = e.code || e.message;
+        attempts.push({
+          url,
+          ok: false,
+          error: code,
+          status: e.response?.status,
+          retry: attemptNum > 1,
+        });
+
+        const isTimeout   = TIMEOUT_CODES.has(code);
+        const isTransient = TRANSIENT_CODES.has(code);
+
+        // Decide whether to retry this URL or move on:
+        //   - Transient DNS (EAI_AGAIN): retry once on ANY candidate
+        //   - Timeout: retry once on first candidate (cold-load Ollama)
+        //   - Anything else: move on immediately
+        const shouldRetry =
+          attemptNum < 2 && (isTransient || (isFirst && isTimeout));
+
+        if (!shouldRetry) break;
+
+        // Short backoff before retry — EAI_AGAIN usually resolves
+        // in well under a second.
+        await wait(isTransient ? 500 : 1000);
+      }
     }
   }
   return { success: false, attempts };
