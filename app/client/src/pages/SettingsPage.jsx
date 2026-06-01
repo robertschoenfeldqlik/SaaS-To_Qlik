@@ -7,15 +7,16 @@ import { getEngineHealth, getAiSettings, updateAiSettings, listOllamaModels, dia
 import { useTheme } from '../context/ThemeContext';
 import axios from 'axios';
 
-// Ollama's model list is fetched LIVE from the user's installed instance
-// (see fetchOllamaModels effect) — the static list below is only used for
-// the cloud providers whose model menus are well-known and don't drift.
+// Live model lists are fetched from the provider where supported (Ollama,
+// Bedrock, GitHub Models). The fallback list below is just a seed — the UI
+// switches to the live list as soon as the provider is selected.
 const PROVIDER_CONFIG = {
   ollama: {
     name: 'Ollama (Local)',
     icon: '🦙',
     requiresKey: false,
-    models: [], // populated dynamically from /api/ai/ollama/models
+    liveModels: true,                // dropdown is populated from /api/ai/ollama/models
+    models: [],
     description: 'Free, local LLM. No API key needed. Must be running on your machine.',
     defaultBaseUrl: 'http://localhost:11434',
   },
@@ -23,6 +24,7 @@ const PROVIDER_CONFIG = {
     name: 'OpenAI',
     icon: '🤖',
     requiresKey: true,
+    liveModels: false,
     models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o3-mini'],
     description: 'Cloud-hosted GPT models. Requires an OpenAI API key.',
     defaultBaseUrl: '',
@@ -31,8 +33,34 @@ const PROVIDER_CONFIG = {
     name: 'Anthropic Claude',
     icon: '🧠',
     requiresKey: true,
+    liveModels: false,
     models: ['claude-sonnet-4-6-20250514', 'claude-haiku-4-5-20251001', 'claude-opus-4-6-20250514'],
     description: 'Cloud-hosted Claude models. Requires an Anthropic API key.',
+    defaultBaseUrl: '',
+  },
+  bedrock: {
+    name: 'AWS Bedrock',
+    icon: '☁️',
+    requiresKey: false,
+    requiresAws: true,
+    liveModels: true,                // dropdown is populated from Test Connection's response
+    models: [
+      'anthropic.claude-3-5-sonnet-20241022-v2:0',
+      'anthropic.claude-3-5-haiku-20241022-v1:0',
+      'anthropic.claude-3-haiku-20240307-v1:0',
+      'meta.llama3-70b-instruct-v1:0',
+      'amazon.titan-text-express-v1',
+    ],
+    description: 'Claude, Llama, Titan, and others hosted on AWS Bedrock. Uses AWS Signature v4 — supply Access Key ID + Secret Access Key, or rely on the server\'s default AWS credential chain (env / ~/.aws/credentials / IAM role).',
+    defaultBaseUrl: '',
+  },
+  github_copilot: {
+    name: 'GitHub Copilot (via GitHub Models)',
+    icon: '🐙',
+    requiresKey: true,
+    liveModels: true,                // populated from Test Connection (catalog/models)
+    models: ['gpt-4o-mini', 'gpt-4o', 'Phi-3.5-mini-instruct', 'Meta-Llama-3.1-70B-Instruct'],
+    description: 'GitHub\'s public Models API. NOTE: this is the general-purpose inference endpoint at models.github.ai — NOT the private Copilot Chat API used by VSCode. Requires a GitHub Personal Access Token with the `models:read` scope.',
     defaultBaseUrl: '',
   },
 };
@@ -61,6 +89,19 @@ export default function SettingsPage() {
   const [ollamaError, setOllamaError] = useState(null);    // { error, hint, attempts }
   const [ollamaDiagnose, setOllamaDiagnose] = useState(null); // { inContainer, resolvedBaseUrl, candidates }
   const [ollamaResolvedUrl, setOllamaResolvedUrl] = useState(null); // url that actually worked
+
+  // Live model lists for cloud providers that expose one (Bedrock + GitHub Models).
+  // Populated by testConnection on success, since the catalog/list endpoints
+  // require credentials. Falls back to the static PROVIDER_CONFIG.models list.
+  const [liveCloudModels, setLiveCloudModels] = useState([]); // string[]
+
+  // AWS Bedrock-specific credentials. region is non-secret (persisted),
+  // accessKeyId is sensitive but commonly known, secretAccessKey is the
+  // actual secret (in-memory only, masked on GET).
+  const [awsRegion, setAwsRegion] = useState('us-east-1');
+  const [awsAccessKeyId, setAwsAccessKeyId] = useState('');
+  const [awsSecretKey, setAwsSecretKey] = useState('');
+  const [awsSecretKeyIsMasked, setAwsSecretKeyIsMasked] = useState(false);
 
   // Pattern matches the server's GET /settings redaction format.
   const isRedactedKey = (s) => {
@@ -98,6 +139,12 @@ export default function SettingsPage() {
         if (models.ok) {
           setOllamaModels(models.models || []);
           setOllamaResolvedUrl(models.resolvedBaseUrl);
+          // Fix for "Connected to qwen2.5:7b" when qwen2.5 isn't installed:
+          // if the currently-saved model isn't in the live list, clear it so
+          // the dropdown falls back to "Default model" and the user is forced
+          // to make an informed pick from what's actually pulled.
+          const live = (models.models || []).map((m) => m.name);
+          setAiModel((prev) => (prev && !live.includes(prev) ? '' : prev));
         } else {
           setOllamaModels([]);
           setOllamaError({
@@ -139,6 +186,16 @@ export default function SettingsPage() {
         setAiApiKey('');
         setAiApiKeyIsMasked(false);
       }
+      // Bedrock fields
+      if (settings.region) setAwsRegion(settings.region);
+      if (settings.accessKeyId) setAwsAccessKeyId(settings.accessKeyId);
+      if (settings.secretAccessKey) {
+        setAwsSecretKey(settings.secretAccessKey);
+        setAwsSecretKeyIsMasked(isRedactedKey(settings.secretAccessKey));
+      } else {
+        setAwsSecretKey('');
+        setAwsSecretKeyIsMasked(false);
+      }
     } catch {}
   };
 
@@ -155,6 +212,14 @@ export default function SettingsPage() {
       if (aiApiKey && !aiApiKeyIsMasked) {
         payload.apiKey = aiApiKey;
       }
+      // Bedrock fields (region + accessKeyId persistable; secretAccessKey in-memory)
+      if (aiProvider === 'bedrock') {
+        payload.region = awsRegion;
+        payload.accessKeyId = awsAccessKeyId;
+        if (awsSecretKey && !awsSecretKeyIsMasked) {
+          payload.secretAccessKey = awsSecretKey;
+        }
+      }
       await updateAiSettings(payload);
       setTestResult({ type: 'success', msg: 'Settings saved' });
     } catch (err) {
@@ -169,22 +234,42 @@ export default function SettingsPage() {
     setAiTesting(true);
     setTestResult(null);
     try {
-      const resp = await axios.post('/api/ai/test-connection', {
+      const payload = {
         provider: aiProvider,
-        apiKey: aiApiKey,
+        apiKey: aiApiKeyIsMasked ? undefined : aiApiKey,  // don't send masked back
         model: aiModel,
         baseUrl: aiBaseUrl,
-      });
+      };
+      if (aiProvider === 'bedrock') {
+        payload.region = awsRegion;
+        payload.accessKeyId = awsAccessKeyId;
+        if (!awsSecretKeyIsMasked) payload.secretAccessKey = awsSecretKey;
+      }
+      const resp = await axios.post('/api/ai/test-connection', payload);
       if (resp.data.success) {
-        setTestResult({ type: 'success', msg: `Connected to ${resp.data.model || aiProvider}` });
+        // Build a more informative success message that distinguishes
+        // "service reachable" from "configured model actually works".
+        const msg = resp.data.modelInstalled === false
+          ? `Service reachable, but model "${resp.data.model}" isn't available`
+          : `Connected — model: ${resp.data.model || '(default)'}`;
+        setTestResult({ type: 'success', msg });
+
+        // Cache live models for cloud providers that returned them
+        if (Array.isArray(resp.data.modelsAvailable) && resp.data.modelsAvailable.length) {
+          setLiveCloudModels(resp.data.modelsAvailable);
+        }
       } else {
         setTestResult({ type: 'error', msg: resp.data.error || 'Connection failed' });
+        // Even on failure, if the server reported the available list, surface it
+        if (Array.isArray(resp.data.modelsAvailable) && resp.data.modelsAvailable.length) {
+          setLiveCloudModels(resp.data.modelsAvailable);
+        }
       }
     } catch (err) {
       setTestResult({ type: 'error', msg: err.response?.data?.error || err.message });
     } finally {
       setAiTesting(false);
-      setTimeout(() => setTestResult(null), 6000);
+      setTimeout(() => setTestResult(null), 8000);
     }
   };
 
@@ -285,12 +370,12 @@ export default function SettingsPage() {
             </p>
           </div>
 
-          {/* API Key (not for Ollama) */}
+          {/* API Key (not for Ollama / Bedrock) */}
           {currentProvider.requiresKey && (
             <div>
               <label className="input-label flex items-center gap-1">
                 <Key className="w-3 h-3" />
-                API Key
+                {aiProvider === 'github_copilot' ? 'GitHub PAT (models:read scope)' : 'API Key'}
               </label>
               <input
                 type="password"
@@ -300,7 +385,61 @@ export default function SettingsPage() {
                 placeholder={`Enter ${currentProvider.name} API key`}
                 className="input"
               />
+              {aiProvider === 'github_copilot' && (
+                <p className="text-xs mt-1" style={{ color: 'rgb(var(--color-text-muted))' }}>
+                  Create one at github.com/settings/personal-access-tokens with the <code>models:read</code> scope.
+                </p>
+              )}
             </div>
+          )}
+
+          {/* AWS Bedrock credentials */}
+          {currentProvider.requiresAws && (
+            <>
+              <div>
+                <label className="input-label flex items-center gap-1">
+                  <Cloud className="w-3 h-3" />
+                  AWS Region
+                </label>
+                <input
+                  type="text"
+                  value={awsRegion}
+                  onChange={(e) => setAwsRegion(e.target.value)}
+                  placeholder="us-east-1"
+                  className="input"
+                />
+              </div>
+              <div>
+                <label className="input-label flex items-center gap-1">
+                  <Key className="w-3 h-3" />
+                  AWS Access Key ID <span className="opacity-60 font-normal">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={awsAccessKeyId}
+                  onChange={(e) => setAwsAccessKeyId(e.target.value)}
+                  placeholder="AKIA…"
+                  className="input"
+                />
+              </div>
+              <div>
+                <label className="input-label flex items-center gap-1">
+                  <Key className="w-3 h-3" />
+                  AWS Secret Access Key <span className="opacity-60 font-normal">(optional)</span>
+                </label>
+                <input
+                  type="password"
+                  value={awsSecretKey}
+                  onChange={(e) => { setAwsSecretKey(e.target.value); setAwsSecretKeyIsMasked(false); }}
+                  onFocus={() => { if (awsSecretKeyIsMasked) { setAwsSecretKey(''); setAwsSecretKeyIsMasked(false); } }}
+                  placeholder="(leave blank to use AWS default credential chain)"
+                  className="input"
+                />
+                <p className="text-xs mt-1" style={{ color: 'rgb(var(--color-text-muted))' }}>
+                  Leave both fields blank to fall back to the server's environment (AWS_ACCESS_KEY_ID / AWS_PROFILE / IAM role).
+                </p>
+              </div>
+            </>
           )}
 
           {/* Model selector */}
@@ -315,6 +454,11 @@ export default function SettingsPage() {
                     : ollamaError
                       ? <span className="text-amber-600">Ollama unreachable</span>
                       : <>{ollamaModels.length} installed</>}
+                </span>
+              )}
+              {currentProvider.liveModels && aiProvider !== 'ollama' && (
+                <span className="text-[10px] font-normal" style={{ color: 'rgb(var(--color-text-muted))' }}>
+                  {liveCloudModels.length > 0 ? `${liveCloudModels.length} from live catalog` : 'Hit Test Connection to load live list'}
                 </span>
               )}
             </label>
@@ -333,7 +477,10 @@ export default function SettingsPage() {
                       {m.name}{m.parameterSize ? ` — ${m.parameterSize}` : ''}{m.quantization ? ` ${m.quantization}` : ''}
                     </option>
                   ))
-                : currentProvider.models.map((m) => (
+                : ((currentProvider.liveModels && liveCloudModels.length > 0)
+                    ? liveCloudModels
+                    : currentProvider.models
+                  ).map((m) => (
                     <option key={m} value={m}>{m}</option>
                   ))
               }

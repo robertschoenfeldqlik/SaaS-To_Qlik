@@ -62,8 +62,9 @@ function saveSettings() {
   try {
     const dir = path.dirname(SETTINGS_PATH);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    // EXCLUDE apiKey from disk persistence
-    const { apiKey, ...persistable } = aiSettings;
+    // EXCLUDE apiKey AND secretAccessKey from disk persistence — both are
+    // sensitive credentials that should stay in memory only.
+    const { apiKey, secretAccessKey, ...persistable } = aiSettings;
     fs.writeFileSync(SETTINGS_PATH, JSON.stringify(persistable, null, 2), 'utf8');
   } catch (err) {
     logger.error({ err: err.message }, 'Failed to persist AI settings');
@@ -497,10 +498,96 @@ async function callAnthropic(systemPrompt, userMessage, config) {
   };
 }
 
+/**
+ * Call AWS Bedrock (Claude / Llama / Titan / etc. on AWS).
+ *
+ * Auth uses standard AWS credentials. Resolution order (matches AWS SDK
+ * default chain):
+ *   1. Per-request config: { accessKeyId, secretAccessKey, region }
+ *   2. Environment: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION
+ *   3. Shared credentials file (~/.aws/credentials)
+ *   4. EC2/ECS/EKS instance role
+ *
+ * config.model is a Bedrock model ID, e.g.:
+ *   anthropic.claude-3-5-sonnet-20241022-v2:0
+ *   anthropic.claude-3-haiku-20240307-v1:0
+ *   meta.llama3-70b-instruct-v1:0
+ *   amazon.titan-text-express-v1
+ *
+ * The Converse API normalises message format across Bedrock-hosted models,
+ * so we don't have to switch JSON shape per family.
+ */
+async function callBedrock(systemPrompt, userMessage, config) {
+  const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
+  const region = config.region || aiSettings.region || process.env.AWS_REGION || 'us-east-1';
+  const clientConfig = { region };
+  if (config.accessKeyId && config.secretAccessKey) {
+    clientConfig.credentials = {
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      sessionToken: config.sessionToken || undefined,
+    };
+  }
+  const client = new BedrockRuntimeClient(clientConfig);
+  const modelId = config.model || 'anthropic.claude-3-5-sonnet-20241022-v2:0';
+
+  const resp = await client.send(new ConverseCommand({
+    modelId,
+    system: systemPrompt ? [{ text: systemPrompt }] : undefined,
+    messages: [{ role: 'user', content: [{ text: userMessage }] }],
+    inferenceConfig: { maxTokens: 4096, temperature: 0.1 },
+  }));
+
+  const text = resp.output?.message?.content?.[0]?.text || '';
+  const tokens = (resp.usage?.inputTokens || 0) + (resp.usage?.outputTokens || 0);
+
+  return { text, tokens, model: modelId, provider: 'bedrock' };
+}
+
+/**
+ * Call GitHub's Models endpoint (the public, general-purpose alternative
+ * to the closed Copilot Chat API). OpenAI-compatible request shape.
+ *
+ * Auth: GitHub Personal Access Token with `models:read` scope.
+ * Endpoint: https://models.github.ai/inference/chat/completions
+ * Models: gpt-4o, gpt-4o-mini, Phi-3.5-mini-instruct, Llama-3.1-70B-Instruct, etc.
+ *
+ * NOTE: This is GitHub Models, NOT the private Copilot Chat API embedded
+ * in VSCode. The latter requires a Copilot subscription and an undocumented
+ * OAuth flow; Models is the public, programmatic equivalent.
+ */
+async function callGitHubCopilot(systemPrompt, userMessage, config) {
+  const baseUrl = config.baseUrl || 'https://models.github.ai/inference';
+  const model = config.model || 'gpt-4o-mini';
+
+  const resp = await axios.post(`${baseUrl}/chat/completions`, {
+    model,
+    messages: [
+      ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+      { role: 'user', content: userMessage },
+    ],
+    temperature: 0.1,
+    max_tokens: 4096,
+  }, {
+    headers: {
+      'Authorization': `Bearer ${config.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    timeout: 120000,
+  });
+
+  const text = resp.data.choices?.[0]?.message?.content || '';
+  const tokens = resp.data.usage?.total_tokens || 0;
+
+  return { text, tokens, model, provider: 'github_copilot' };
+}
+
 const PROVIDERS = {
   openai: callOpenAI,
   ollama: callOllama,
   anthropic: callAnthropic,
+  bedrock: callBedrock,
+  github_copilot: callGitHubCopilot,
 };
 
 /**
@@ -770,7 +857,8 @@ router.get('/ollama/diagnose', (req, res) => {
 // Uses a simple ping that doesn't require JSON mode (compatible with all providers)
 router.post('/test-connection', async (req, res) => {
   try {
-    const { provider: testProvider, apiKey, model, baseUrl } = req.body;
+    const { provider: testProvider, apiKey, model, baseUrl,
+            region, accessKeyId, secretAccessKey } = req.body;
     const providerName = testProvider || aiSettings.provider;
 
     if (!PROVIDERS[providerName]) {
@@ -781,11 +869,28 @@ router.post('/test-connection', async (req, res) => {
       apiKey: apiKey || aiSettings.apiKey,
       model: model || aiSettings.model,
       baseUrl: baseUrl || aiSettings.baseUrl,
+      // Bedrock-specific
+      region: region || aiSettings.region,
+      accessKeyId: accessKeyId || aiSettings.accessKeyId,
+      secretAccessKey: secretAccessKey || aiSettings.secretAccessKey,
     };
 
     // Validate config per provider
-    if ((providerName === 'openai' || providerName === 'anthropic') && !config.apiKey) {
+    if ((providerName === 'openai' || providerName === 'anthropic' || providerName === 'github_copilot') && !config.apiKey) {
       return res.json({ success: false, error: `API key required for ${providerName}` });
+    }
+    if (providerName === 'bedrock') {
+      // Allow falling back to default credential chain (env, ~/.aws/credentials, IAM role)
+      // but warn if neither explicit creds nor any env vars look set.
+      const hasExplicit = config.accessKeyId && config.secretAccessKey;
+      const hasEnv = process.env.AWS_ACCESS_KEY_ID || process.env.AWS_PROFILE;
+      if (!hasExplicit && !hasEnv) {
+        return res.json({
+          success: false,
+          error: 'AWS Bedrock requires credentials',
+          hint: 'Either supply Access Key ID + Secret Access Key here, or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION env vars on the server.',
+        });
+      }
     }
 
     // Minimal ping per provider — no JSON mode (some providers reject JSON mode without the word "JSON" in messages)
@@ -816,19 +921,112 @@ router.post('/test-connection', async (req, res) => {
       });
       result = { model: resp.data.model, tokens: (resp.data.usage?.input_tokens || 0) + (resp.data.usage?.output_tokens || 0) };
     } else if (providerName === 'ollama') {
-      // resolveOllamaUrl rewrites localhost → host.docker.internal when this
-      // server runs inside Docker, so the user's local Ollama (on the host)
-      // is actually reachable.
-      const ollamaUrl = resolveOllamaUrl(config.baseUrl);
-      // Ollama /api/tags is the lightest check — confirms the service is up
-      const resp = await axios.get(`${ollamaUrl}/api/tags`, { timeout: 5000 });
-      const modelsAvailable = (resp.data.models || []).map(m => m.name);
+      // Use the multi-candidate probe so we get the same fallback chain as
+      // /api/ai/ollama/models. resolveOllamaUrl alone wouldn't handle Linux
+      // Docker or restrictive setups.
+      const probe = await probeOllama(config.baseUrl, axios, 5000);
+      if (!probe.success) {
+        return res.json({
+          success: false,
+          error: 'Ollama is not reachable on any candidate URL',
+          attempts: probe.attempts,
+          inContainer: inContainer(),
+        });
+      }
+      const modelsAvailable = (probe.models || []).map(m => m.name);
+
+      // CRITICAL: verify the user's saved model is actually installed. We
+      // previously echoed config.model back as "Connected to <model>" even
+      // when that model didn't exist — misleading, because Ollama's /api/tags
+      // ping succeeds regardless of which models are pulled.
+      const requestedModel = config.model;
+      const requestedInstalled = !requestedModel || modelsAvailable.includes(requestedModel);
+
+      if (requestedModel && !requestedInstalled) {
+        return res.json({
+          success: false,
+          error: `Selected model "${requestedModel}" is not installed on this Ollama instance`,
+          hint: modelsAvailable.length
+            ? `Installed models: ${modelsAvailable.join(', ')}. Pick one from the dropdown, or run \`ollama pull ${requestedModel}\` on the host.`
+            : `No models are installed at all. Run \`ollama pull <model>\` on the host (e.g. \`ollama pull llama3.1:8b\`) and refresh.`,
+          modelsAvailable,
+          resolvedBaseUrl: probe.url,
+          inContainer: inContainer(),
+        });
+      }
+
       result = {
-        model: config.model || modelsAvailable[0] || '(none installed)',
+        model: requestedModel || modelsAvailable[0] || '(none installed)',
+        modelInstalled: requestedInstalled,
         tokens: 0,
         modelsAvailable,
-        resolvedBaseUrl: ollamaUrl,
+        resolvedBaseUrl: probe.url,
         inContainer: inContainer(),
+      };
+    } else if (providerName === 'bedrock') {
+      // ListFoundationModels is the lightest verification — confirms the
+      // region is right AND the credentials have permission to even see
+      // Bedrock. We do NOT issue a real inference call (would burn tokens).
+      const { BedrockClient, ListFoundationModelsCommand } = require('@aws-sdk/client-bedrock');
+      const region = config.region || process.env.AWS_REGION || 'us-east-1';
+      const clientConfig = { region };
+      if (config.accessKeyId && config.secretAccessKey) {
+        clientConfig.credentials = {
+          accessKeyId: config.accessKeyId,
+          secretAccessKey: config.secretAccessKey,
+        };
+      }
+      const client = new BedrockClient(clientConfig);
+      const resp = await client.send(new ListFoundationModelsCommand({}));
+      const modelsAvailable = (resp.modelSummaries || [])
+        .filter((m) => m.modelLifecycle?.status === 'ACTIVE')
+        .map((m) => m.modelId)
+        .sort();
+      const requested = config.model;
+      const requestedAvailable = !requested || modelsAvailable.includes(requested);
+      if (requested && !requestedAvailable) {
+        return res.json({
+          success: false,
+          error: `Bedrock model "${requested}" is not enabled in region ${region}`,
+          hint: `Available in this region: ${modelsAvailable.slice(0, 8).join(', ')}${modelsAvailable.length > 8 ? ', …' : ''}. Enable model access in the AWS Bedrock console under Model access.`,
+          modelsAvailable,
+          region,
+        });
+      }
+      result = {
+        model: requested || modelsAvailable[0] || '(none enabled)',
+        modelInstalled: requestedAvailable,
+        tokens: 0,
+        modelsAvailable,
+        region,
+      };
+    } else if (providerName === 'github_copilot') {
+      // GitHub Models exposes /catalog/models for listing + an OpenAI-compatible
+      // /inference/chat/completions for inference. Test by hitting the catalog
+      // (cheap, no tokens consumed).
+      const baseUrl = config.baseUrl || 'https://models.github.ai';
+      const resp = await axios.get(`${baseUrl}/catalog/models`, {
+        headers: { 'Authorization': `Bearer ${config.apiKey}`, 'Accept': 'application/json' },
+        timeout: 15000,
+      });
+      const list = Array.isArray(resp.data) ? resp.data : (resp.data.models || []);
+      const modelsAvailable = list.map((m) => m.id || m.name).filter(Boolean);
+      const requested = config.model;
+      const requestedAvailable = !requested || modelsAvailable.includes(requested);
+      if (requested && !requestedAvailable) {
+        return res.json({
+          success: false,
+          error: `GitHub Models doesn't expose "${requested}"`,
+          hint: `Available models: ${modelsAvailable.slice(0, 10).join(', ')}${modelsAvailable.length > 10 ? ', …' : ''}.`,
+          modelsAvailable,
+        });
+      }
+      result = {
+        model: requested || modelsAvailable[0] || 'gpt-4o-mini',
+        modelInstalled: requestedAvailable,
+        tokens: 0,
+        modelsAvailable,
+        catalogSize: modelsAvailable.length,
       };
     }
 
@@ -858,17 +1056,29 @@ router.post('/test-connection', async (req, res) => {
 // GET /api/ai/settings — Get AI provider settings
 router.get('/settings', (req, res) => {
   const settings = { ...aiSettings };
-  // Never return the full API key
+  // Never return the full API key OR the AWS secret access key
   if (settings.apiKey) {
     settings.apiKey = settings.apiKey.length > 12
       ? settings.apiKey.slice(0, 8) + '...' + settings.apiKey.slice(-4)
       : '****';
   }
-  settings.configured = !!(settings.provider && (settings.provider === 'ollama' || settings.apiKey));
+  if (settings.secretAccessKey) {
+    settings.secretAccessKey = settings.secretAccessKey.length > 12
+      ? settings.secretAccessKey.slice(0, 8) + '...' + settings.secretAccessKey.slice(-4)
+      : '****';
+  }
+  const isConfigured = !!settings.provider && (
+    settings.provider === 'ollama' ||
+    (settings.provider === 'bedrock' && (settings.accessKeyId || process.env.AWS_ACCESS_KEY_ID)) ||
+    settings.apiKey
+  );
+  settings.configured = isConfigured;
   settings.availableProviders = [
-    { id: 'ollama', name: 'Ollama (Local)', requiresKey: false },
-    { id: 'openai', name: 'OpenAI', requiresKey: true },
-    { id: 'anthropic', name: 'Anthropic Claude', requiresKey: true },
+    { id: 'ollama',         name: 'Ollama (Local)',                   requiresKey: false },
+    { id: 'openai',         name: 'OpenAI',                           requiresKey: true  },
+    { id: 'anthropic',      name: 'Anthropic Claude',                 requiresKey: true  },
+    { id: 'bedrock',        name: 'AWS Bedrock',                      requiresKey: false, requiresAws: true },
+    { id: 'github_copilot', name: 'GitHub Copilot (via GitHub Models)', requiresKey: true },
   ];
   res.json(settings);
 });
@@ -884,19 +1094,27 @@ function isMaskedKey(s) {
 
 // PUT /api/ai/settings — Update AI provider settings (key is in-memory only)
 router.put('/settings', (req, res) => {
-  const { provider, apiKey, model, baseUrl } = req.body;
+  const { provider, apiKey, model, baseUrl,
+          region, accessKeyId, secretAccessKey } = req.body;
 
   // Cap input lengths to prevent DoS via giant strings
   if (apiKey && apiKey.length > 500) {
     return res.status(400).json({ error: 'apiKey too long' });
   }
-  if (provider && !['ollama', 'openai', 'anthropic'].includes(provider)) {
+  if (secretAccessKey && secretAccessKey.length > 500) {
+    return res.status(400).json({ error: 'secretAccessKey too long' });
+  }
+  if (provider && !['ollama', 'openai', 'anthropic', 'bedrock', 'github_copilot'].includes(provider)) {
     return res.status(400).json({ error: `Unknown provider: ${provider}` });
   }
 
   if (provider) aiSettings.provider = provider;
   if (model !== undefined) aiSettings.model = model;
   if (baseUrl !== undefined) aiSettings.baseUrl = baseUrl;
+  // Bedrock-specific: region is non-secret (persisted); access key id is
+  // sensitive but commonly known; secret access key is fully redacted on GET.
+  if (region !== undefined) aiSettings.region = region;
+  if (accessKeyId !== undefined) aiSettings.accessKeyId = accessKeyId;
 
   // KEY HANDLING: only update if a non-redacted, non-empty value is provided.
   // This prevents the masked GET response from overwriting the real key.
@@ -904,10 +1122,14 @@ router.put('/settings', (req, res) => {
     aiSettings.apiKey = apiKey;
     logger.info({ provider: aiSettings.provider }, 'AI key updated in memory');
   }
+  if (secretAccessKey !== undefined && secretAccessKey !== '' && !isMaskedKey(secretAccessKey)) {
+    aiSettings.secretAccessKey = secretAccessKey;
+    logger.info({ provider: aiSettings.provider }, 'AWS secret key updated in memory');
+  }
 
-  saveSettings(); // persists provider/model/baseUrl ONLY (key is excluded)
+  saveSettings(); // persists provider/model/baseUrl/region/accessKeyId ONLY (secrets excluded)
   logger.info({ provider: aiSettings.provider, model: aiSettings.model },
-              'AI settings updated (provider+model+baseUrl persisted; key in-memory only)');
+              'AI settings updated (non-secret fields persisted)');
   res.json({ success: true });
 });
 
