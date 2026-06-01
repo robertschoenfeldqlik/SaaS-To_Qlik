@@ -195,8 +195,13 @@ export default function ApiSourceWizard() {
         }`
       );
     } catch (aiErr) {
-      const msg = aiErr.response?.data?.error || aiErr.message;
-      setError(`AI discovery failed: ${msg}`);
+      // Server now returns { error, hint?, code?, modelsAvailable?, attempts? }
+      // — show the error line and the hint when present so the user knows
+      // what to do, instead of just "Request failed with status code 404".
+      const data = aiErr.response?.data;
+      const lead = data?.error || aiErr.message;
+      const hint = data?.hint;
+      setError(hint ? `AI discovery failed: ${lead} — ${hint}` : `AI discovery failed: ${lead}`);
     } finally {
       setDiscovering(false);
     }

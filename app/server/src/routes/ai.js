@@ -411,11 +411,46 @@ async function callOpenAI(systemPrompt, userMessage, config) {
  *  6. Truncate user content to ~16k chars so prompt_eval_count stays under 5k on small models.
  */
 async function callOllama(systemPrompt, userMessage, config) {
-  // resolveOllamaUrl auto-rewrites localhost → host.docker.internal when
-  // we're running inside Docker, so the user can keep typing the natural
-  // http://localhost:11434 and it Just Works.
-  const baseUrl = resolveOllamaUrl(config.baseUrl);
-  const model = config.model || 'llama3.1';
+  // Use the multi-candidate probe so we find Ollama wherever it's actually
+  // reachable (host.docker.internal vs bridge gateway vs localhost) AND so
+  // we get back the live installed-models list in one round-trip. Saves us
+  // from the previous bug where we defaulted to "llama3.1" — a model most
+  // users haven't pulled — and got a confusing HTTP 404 back.
+  const probe = await probeOllama(config.baseUrl, axios, 5000);
+  if (!probe.success) {
+    const err = new Error('Ollama is not reachable on any candidate URL');
+    err.code = 'OLLAMA_UNREACHABLE';
+    err.attempts = probe.attempts;
+    throw err;
+  }
+  const baseUrl = probe.url;
+  const installed = (probe.models || []).map((m) => m.name);
+
+  // Resolve the model in priority order:
+  //   1. Caller-supplied config.model (only if it's actually installed)
+  //   2. First installed model — whatever the user has pulled
+  //   3. Hard error: Ollama running but with zero models
+  let model = config.model;
+  if (model && !installed.includes(model)) {
+    const err = new Error(
+      `Configured model "${model}" is not installed on this Ollama. ` +
+      (installed.length
+        ? `Installed: ${installed.join(', ')}. Pick one in Settings, or run \`ollama pull ${model}\`.`
+        : `No models are installed at all. Run \`ollama pull <model>\` on the host.`)
+    );
+    err.code = 'OLLAMA_MODEL_NOT_INSTALLED';
+    err.modelsAvailable = installed;
+    throw err;
+  }
+  if (!model) {
+    if (installed.length === 0) {
+      const err = new Error('Ollama is running but no models are installed. Run `ollama pull <model>` on the host.');
+      err.code = 'OLLAMA_NO_MODELS';
+      throw err;
+    }
+    model = installed[0];
+  }
+
   const isQwen3 = /qwen3/i.test(model);
 
   // Qwen3 emits a <think> block by default — suppress it to save tokens.
@@ -454,7 +489,7 @@ async function callOllama(systemPrompt, userMessage, config) {
     tokens: (resp.data.prompt_eval_count || 0) + (resp.data.eval_count || 0),
     promptTokens: resp.data.prompt_eval_count || 0,
     outputTokens: resp.data.eval_count || 0,
-    model,
+    model,           // the actual model used (may differ from caller's request if we auto-picked)
     provider: 'ollama',
   };
 }
@@ -823,12 +858,37 @@ router.post('/generate-config', async (req, res) => {
       },
     });
   } catch (err) {
-    logger.error({ err }, 'AI config generation failed');
+    logger.error({ msg: err.message, code: err.code, modelsAvailable: err.modelsAvailable }, 'AI config generation failed');
 
-    // Provide helpful error messages per provider
+    // Provide helpful error messages per provider + per failure mode.
+    // Pass-through hints from the provider adapters (callOllama, callBedrock, …)
+    // so the UI sees a single, actionable line.
     let userMsg = err.message;
+    let hint;
+
+    if (err.code === 'OLLAMA_MODEL_NOT_INSTALLED' || err.code === 'OLLAMA_NO_MODELS') {
+      // The adapter already built a complete, user-facing message in err.message.
+      // No need to wrap it further.
+      return res.status(400).json({ error: err.message, code: err.code, modelsAvailable: err.modelsAvailable });
+    }
+    if (err.code === 'OLLAMA_UNREACHABLE') {
+      return res.status(502).json({
+        error: 'Ollama is not reachable on any candidate URL',
+        hint: 'Make sure `ollama serve` is running on the host. If this server is in Docker, your Ollama must be bound to 0.0.0.0:11434, not 127.0.0.1.',
+        attempts: err.attempts,
+        code: err.code,
+      });
+    }
     if (err.response?.status === 401) {
       userMsg = 'Invalid API key. Check your API key in Settings.';
+    } else if (err.response?.status === 404 && aiSettings.provider === 'ollama') {
+      // Older Ollama servers return 404 for unknown models. Translate.
+      const ollamaErr = err.response.data?.error || '';
+      const m = /model "([^"]+)"/.exec(ollamaErr);
+      userMsg = m
+        ? `Ollama model "${m[1]}" not found on the host. Pick an installed model in Settings, or pull it with \`ollama pull ${m[1]}\`.`
+        : `Ollama returned 404 — usually means the configured model isn't installed.`;
+      hint = 'Open Settings → AI Provider and select a model that shows up in the live list.';
     } else if (err.code === 'ECONNREFUSED') {
       userMsg = `Cannot connect to ${aiSettings.provider}. ${
         aiSettings.provider === 'ollama'
@@ -837,7 +897,9 @@ router.post('/generate-config', async (req, res) => {
       }`;
     }
 
-    res.status(500).json({ error: `AI generation failed: ${userMsg}` });
+    const payload = { error: `AI generation failed: ${userMsg}` };
+    if (hint) payload.hint = hint;
+    res.status(500).json(payload);
   }
 });
 
