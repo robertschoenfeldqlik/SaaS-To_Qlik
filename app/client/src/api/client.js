@@ -81,8 +81,11 @@ export const compareFixtures = ({ fixtureAId, fixtureBId, recordsPath }) =>
   api.post('/probe/compare', { fixtureAId, fixtureBId, recordsPath }).then((r) => r.data);
 
 // ── AI ──
+// /ai/fetch-url can take up to ~45s for slow docs sites — bump the default
+// 30s axios timeout so the browser doesn't surface "Network Error" before
+// the server has had a chance to respond.
 export const fetchUrl = (url) =>
-  api.post('/ai/fetch-url', { url }).then((r) => r.data);
+  api.post('/ai/fetch-url', { url }, { timeout: 60_000 }).then((r) => r.data);
 
 export const generateAiConfig = (input) =>
   api.post('/ai/generate-config', input).then((r) => r.data);

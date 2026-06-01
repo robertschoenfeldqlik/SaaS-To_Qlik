@@ -94,7 +94,13 @@ export default function ApiSourceWizard() {
         specText = fetched.content;
         fetchedIsSpec = !!fetched.isSpec;
       } catch (fetchErr) {
-        setError(`Failed to fetch URL: ${fetchErr.response?.data?.error || fetchErr.message}`);
+        // The server now returns structured { error, hint, code } for the
+        // common failure modes (DNS, refused, timeout, cert, HTTP n). Show
+        // both lines so the user sees "what went wrong" + "what to try".
+        const serverErr = fetchErr.response?.data;
+        const hint = serverErr?.hint;
+        const lead = serverErr?.error || fetchErr.message || 'Network error';
+        setError(hint ? `${lead}. ${hint}` : `Failed to fetch URL: ${lead}`);
         setDiscovering(false);
         return;
       }

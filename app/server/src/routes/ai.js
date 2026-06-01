@@ -636,48 +636,133 @@ function stripHtmlToText(html) {
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
-// POST /api/ai/fetch-url — Fetch URL content, strip HTML, return text
+/**
+ * POST /api/ai/fetch-url — Fetch a URL and return its text content.
+ *
+ * Hardened against the common failure modes that produced raw
+ * "Network Error" in the browser before:
+ *   - Bumped server-side timeout 15s → 45s (slow docs sites are common).
+ *   - Set a browser-like User-Agent; many API doc sites 403 the default
+ *     axios UA ("axios/1.16.0").
+ *   - Cap response size at 20 MB so a huge HTML page can't OOM us.
+ *   - Translate every axios error code into a clear, user-facing message
+ *     (DNS / refused / SSL / timeout / status code N), instead of leaving
+ *     the bare "Network Error" / "Request failed" strings to bubble.
+ *   - Reject obviously bad URLs (missing scheme, non-HTTP/HTTPS) with 400
+ *     before making any outbound call.
+ */
 router.post('/fetch-url', async (req, res) => {
-  try {
-    const { url } = req.body;
-    if (!url) {
-      return res.status(400).json({ error: 'URL is required' });
-    }
+  const { url } = req.body || {};
+  if (!url || typeof url !== 'string') {
+    return res.status(400).json({ error: 'URL is required' });
+  }
 
-    const response = await axios.get(url, {
-      headers: { 'Accept': 'text/html,application/json,text/plain,*/*' },
-      timeout: 15000,
+  // Validate the URL before hitting the network so we return 400 instead of
+  // a misleading "Network Error".
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url.trim());
+  } catch {
+    return res.status(400).json({ error: `Not a valid URL: "${url}"` });
+  }
+  if (!/^https?:$/i.test(parsedUrl.protocol)) {
+    return res.status(400).json({
+      error: `Only http:// and https:// URLs are supported (got "${parsedUrl.protocol}").`,
+    });
+  }
+
+  try {
+    const response = await axios.get(parsedUrl.toString(), {
+      headers: {
+        // Real browser-shaped UA — many doc sites 403 plain axios.
+        'User-Agent': 'Mozilla/5.0 (compatible; SaaSToTalend/1.0; +https://github.com/robertschoenfeldqlik/SaaS-To_Qlik)',
+        'Accept': 'text/html,application/json,application/xml,application/yaml,text/plain,*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      timeout: 45_000,           // many real-world spec/docs sites need 20–40s
       maxRedirects: 5,
+      maxContentLength: 20 * 1024 * 1024,  // 20 MB hard cap
+      maxBodyLength:    20 * 1024 * 1024,
+      // Get raw text — Jackson/JSON.parse later, after we decide what it is.
+      transformResponse: [(data) => data],
+      validateStatus: () => true,  // we'll handle non-2xx ourselves below
     });
 
-    let text = typeof response.data === 'string' ? response.data : JSON.stringify(response.data, null, 2);
-    let contentType = response.headers['content-type'] || '';
-
-    // Detect if it's an OpenAPI/Swagger spec
-    let isSpec = false;
-    if (contentType.includes('json')) {
-      try {
-        const parsed = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
-        if (parsed.openapi || parsed.swagger || parsed.paths) {
-          isSpec = true;
-        }
-      } catch {}
+    if (response.status < 200 || response.status >= 300) {
+      const snippet = typeof response.data === 'string'
+        ? response.data.slice(0, 300)
+        : '';
+      return res.status(502).json({
+        error: `Upstream returned HTTP ${response.status} for ${parsedUrl.hostname}`,
+        hint: response.status === 403
+          ? 'The site is blocking automated requests. Try downloading the spec manually and pasting it into the textarea below.'
+          : response.status === 404
+            ? 'URL not found. Double-check the path — many APIs publish their OpenAPI spec under /openapi.json, /openapi.yaml, or /swagger.json.'
+            : response.status === 401
+              ? 'The site requires authentication to view this URL.'
+              : undefined,
+        snippet: snippet || undefined,
+      });
     }
 
-    // Strip HTML if needed
+    let text = typeof response.data === 'string' ? response.data : '';
+    const contentType = (response.headers['content-type'] || '').toLowerCase();
+
+    // Detect OpenAPI/Swagger spec from BOTH JSON and YAML responses.
+    let isSpec = false;
+    if (contentType.includes('json') || /^\s*\{/.test(text)) {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed.openapi || parsed.swagger || parsed.paths) isSpec = true;
+      } catch {}
+    } else if (/^\s*(openapi|swagger)\s*:\s*['"]?\d/m.test(text)) {
+      // Quick YAML smoke test — "openapi: 3.0.0" or "swagger: '2.0'"
+      isSpec = true;
+    }
+
+    // Strip HTML if it's docs (not a spec)
     if (!isSpec && (text.includes('<html') || text.includes('<!DOCTYPE'))) {
       text = stripHtmlToText(text);
     }
 
     // Truncate to 60K chars for AI processing
-    if (text.length > 60000) {
-      text = text.substring(0, 60000) + '\n\n[Content truncated at 60,000 characters]';
+    if (text.length > 60_000) {
+      text = text.substring(0, 60_000) + '\n\n[Content truncated at 60,000 characters]';
     }
 
-    res.json({ content: text, contentType, isSpec });
+    res.json({ content: text, contentType, isSpec, fetchedFrom: parsedUrl.toString() });
   } catch (err) {
-    logger.error({ err, url: req.body.url }, 'Failed to fetch URL');
-    res.status(500).json({ error: `Failed to fetch URL: ${err.message}` });
+    logger.error({ msg: err.message, code: err.code, url: parsedUrl.toString() }, 'Failed to fetch URL');
+
+    // Translate axios error codes into actionable messages. ANY of these used
+    // to surface as the opaque "Network Error" string in the browser.
+    let error, hint;
+    switch (err.code) {
+      case 'ENOTFOUND':
+      case 'EAI_AGAIN':
+        error = `DNS lookup failed for "${parsedUrl.hostname}"`;
+        hint = 'Check the URL spelling and your network connection. If the docs are behind a corporate proxy or VPN, the server running this app may not have access.';
+        break;
+      case 'ECONNREFUSED':
+        error = `Connection refused by ${parsedUrl.hostname}`;
+        hint = 'The site rejected the connection — it may be down, or it may not accept connections from this server.';
+        break;
+      case 'ETIMEDOUT':
+      case 'ECONNABORTED':
+        error = `Timed out waiting for ${parsedUrl.hostname}`;
+        hint = 'The site took longer than 45 seconds to respond. Try again, or download the spec manually and paste it below.';
+        break;
+      case 'CERT_HAS_EXPIRED':
+      case 'UNABLE_TO_VERIFY_LEAF_SIGNATURE':
+      case 'DEPTH_ZERO_SELF_SIGNED_CERT':
+        error = `TLS certificate problem with ${parsedUrl.hostname}: ${err.code}`;
+        hint = 'The HTTPS certificate could not be validated. If you trust this host, download the spec manually and paste it below.';
+        break;
+      default:
+        error = `Failed to fetch URL: ${err.message}`;
+    }
+
+    res.status(502).json({ error, hint, code: err.code });
   }
 });
 
