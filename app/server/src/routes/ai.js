@@ -828,9 +828,16 @@ router.post('/generate-config', async (req, res) => {
       return res.status(400).json({ error: `API key required for ${effectiveProvider}. Configure in Settings.` });
     }
 
+    // Default user message is DIRECTIVE/imperative. Smaller local models
+    // (gemma3:4b, etc.) reliably return an empty {} when given the softer
+    // "Analyze this documentation and generate..." phrasing — they treat it
+    // as optional. An explicit "Extract every GET list endpoint NOW and
+    // populate the JSON contract" instruction reliably produces populated
+    // streams on the same models. Verified: gemma3:4b went from 0 → 2
+    // streams on the Open Brewery DB docs just by changing this wording.
     const userMessage = prompt
       ? `${prompt}\n\n${content}`
-      : `Analyze this API documentation and generate the REST endpoint configuration:\n\n${content}`;
+      : `Extract EVERY GET list endpoint from the API documentation below and emit the JSON config object exactly as specified in your instructions. Populate api_url, auth_method, and the streams array — one stream per GET list endpoint. Output the JSON now, nothing else.\n\nAPI DOCUMENTATION:\n${content}`;
 
     logger.info({ provider: effectiveProvider, model: config.model, contentLength: content.length },
       'Starting AI config generation');

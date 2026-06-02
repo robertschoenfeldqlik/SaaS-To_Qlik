@@ -186,12 +186,13 @@ export default function ApiSourceWizard() {
 
       // AI returned empty — show the raw response for debugging
       const provider = aiResult.metadata?.provider || 'AI';
+      const model = aiResult.metadata?.model ? ` (${aiResult.metadata.model})` : '';
       const preview = JSON.stringify(cfg, null, 2).substring(0, 200);
       setError(
-        `${provider} returned no GET endpoints. ${
-          content.length < 500
+        `${provider}${model} returned no GET endpoints. ${
+          specText.length < 500
             ? 'The input may be too short — paste the full OpenAPI spec or a URL to API docs.'
-            : `Check that the content describes REST API endpoints. Response preview: ${preview}`
+            : `The model couldn't extract endpoints from this content. Try a larger model in Settings, or paste a structured OpenAPI spec. Response preview: ${preview}`
         }`
       );
     } catch (aiErr) {
