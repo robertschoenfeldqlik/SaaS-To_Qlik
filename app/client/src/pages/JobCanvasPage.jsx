@@ -37,8 +37,11 @@ function buildGraphFromJob(job) {
 
   const httpClient = {
     id: 'http-1',
+    // type drives the icon/summary mapping (keyed on the Talend componentName
+    // "HTTPClient"); label is the on-canvas instance name Talend shows
+    // ("tHTTPClient"), matching the exported UNIQUE_NAME tHTTPClient_1.
     type: 'HTTPClient',
-    label: 'HTTPClient',
+    label: 'tHTTPClient',
     color: '#009845',
     params: {
       URL: { type: 'TEXT', value: fullUrl },

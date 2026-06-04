@@ -508,7 +508,7 @@ export default function ApiSourceWizard() {
                     Generating Talend job definitions...
                   </p>
                   <p className="text-xs mt-1" style={{ color: 'rgb(var(--color-text-secondary))' }}>
-                    Creating HTTPClient, tExtractJSONFields, and output components
+                    Creating tHTTPClient, tExtractJSONFields, and output components
                   </p>
                 </div>
               )}
